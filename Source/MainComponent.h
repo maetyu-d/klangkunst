@@ -27,7 +27,7 @@ private:
 
 public:
     enum class Mode { title, build, performance };
-    enum class MenuAction { resume, save, load, demo, blank };
+    enum class MenuAction { resume, save, load, demo, blank, quit };
     enum class ToolType { none, redirect, speed, ratchet, key, scale, section };
     enum class ScaleType { chromatic, major, minor, dorian, pentatonic };
     enum class PlayMode { melodic, chord, arpeggio };
@@ -84,10 +84,19 @@ private:
         float secondsRemaining = 0.2f;
     };
 
+    struct PendingNoteOn
+    {
+        int note = 60;
+        float velocity = 0.8f;
+        float lengthSeconds = 0.2f;
+        float secondsRemaining = 0.0f;
+    };
+
     class WaveVoice final : public juce::SynthesiserVoice
     {
     public:
-        explicit WaveVoice(SynthEngine& engineRef) : engine(engineRef) {}
+        explicit WaveVoice(SynthEngine& engineRef, double& bpmRef, bool& chordLatchRef)
+            : engine(engineRef), bpm(bpmRef), chordLatchMode(chordLatchRef) {}
 
         bool canPlaySound(juce::SynthesiserSound* s) override;
         void startNote(int midiNoteNumber, float velocity, juce::SynthesiserSound*, int) override;
@@ -98,6 +107,8 @@ private:
 
     private:
         SynthEngine& engine;
+        double& bpm;
+        bool& chordLatchMode;
         juce::ADSR adsr;
         juce::ADSR::Parameters adsrParams;
         double currentSampleRate = 44100.0;
@@ -228,8 +239,10 @@ private:
     void setBlock(int x, int y, int z, bool enabled);
     int topBlockZ(int x, int y) const;
 
-    void triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet = 1, int gateSection = -1);
+    int triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet = 1, int gateSection = -1, int snakeRole = 0, int forcedImprovStyle = -1);
     void triggerMidi(int midiNote, float velocity, float noteLengthSeconds);
+    void triggerMidiDelayed(int midiNote, float velocity, float noteLengthSeconds, float delaySeconds);
+    void triggerBeatMidi(int midiNote, float velocity);
     void addJuiceAtCell(int x, int y, juce::Colour c, float strength);
 
     void advanceTransport(double deltaSeconds);
@@ -261,6 +274,7 @@ private:
     Snake snakeB;
     std::vector<Pulse> pulses;
     std::vector<Spark> sparks;
+    bool chordLatchMode = false;
 
     int selectedMenu = 0;
     int selectedToolIndex = 1;
@@ -299,10 +313,12 @@ private:
 
     juce::CriticalSection synthLock;
     juce::Synthesiser synth;
+    juce::Synthesiser beatSynth;
     std::unique_ptr<juce::FileChooser> saveAsChooser;
     Miverb miverb;
-    bool miverbEnabled = true;
-    float miverbMix = 0.24f;
+    bool miverbEnabled = false;
+    float miverbMix = 0.00f;
+    std::vector<PendingNoteOn> pendingNoteOns;
     std::vector<PendingNoteOff> pendingNoteOffs;
     double currentSr = 44100.0;
     double elapsedSinceTick = 0.0;

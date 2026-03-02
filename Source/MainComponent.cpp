@@ -58,11 +58,11 @@ juce::String synthToString(MainComponent::SynthEngine s)
 {
     switch (s)
     {
-        case MainComponent::SynthEngine::digitalV4: return "PulseFold Sync";
-        case MainComponent::SynthEngine::fmGlass: return "FM Glass";
-        case MainComponent::SynthEngine::velvetNoise: return "Velvet Chime";
+        case MainComponent::SynthEngine::digitalV4: return "Nova Drift";
+        case MainComponent::SynthEngine::fmGlass: return "Prism FM";
+        case MainComponent::SynthEngine::velvetNoise: return "Mallet Bloom";
     }
-    return "PulseFold Sync";
+    return "Nova Drift";
 }
 
 MainComponent::ScaleType nextScale(MainComponent::ScaleType s)
@@ -86,7 +86,7 @@ MainComponent::SynthEngine nextSynth(MainComponent::SynthEngine s)
 juce::File worldSaveFile()
 {
     return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
-        .getChildFile("KlangKunstWorld.klangkunst.json");
+        .getChildFile("KlangKunstWorld.mat");
 }
 
 int arrangementIndexForSection(int section)
@@ -117,11 +117,11 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     const auto cyclesPerSample = cyclesPerSecond / currentSampleRate;
     angleDelta = cyclesPerSample * juce::MathConstants<double>::twoPi;
     if (engine == SynthEngine::fmGlass)
-        modDelta = cyclesPerSample * 2.73 * juce::MathConstants<double>::twoPi;
+        modDelta = cyclesPerSample * 3.141 * juce::MathConstants<double>::twoPi;
     else if (engine == SynthEngine::digitalV4)
-        modDelta = cyclesPerSample * 1.17 * juce::MathConstants<double>::twoPi;
+        modDelta = cyclesPerSample * 0.613 * juce::MathConstants<double>::twoPi;
     else
-        modDelta = cyclesPerSample * 0.83 * juce::MathConstants<double>::twoPi;
+        modDelta = cyclesPerSample * 1.997 * juce::MathConstants<double>::twoPi;
     subDelta = cyclesPerSample * 0.5 * juce::MathConstants<double>::twoPi;
     currentAngle = 0.0;
     modAngle = 0.0;
@@ -146,26 +146,38 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         adsrParams.sustain = 0.0f;
         adsrParams.release = 0.03f;
     }
+    else if (chordLatchMode)
+    {
+        // Chord-latch: hold with sustain, then fade over roughly one beat after noteOff.
+        const float secondsPerBeat = 60.0f / static_cast<float>(juce::jmax(1.0, bpm));
+        adsrParams.attack = 0.003f;
+        adsrParams.decay = 0.04f;
+        adsrParams.sustain = 1.0f;
+        adsrParams.release = juce::jlimit(0.12f, 0.90f, secondsPerBeat);
+    }
     else if (engine == SynthEngine::digitalV4)
     {
-        adsrParams.attack = 0.020f;
-        adsrParams.decay = 0.45f;
-        adsrParams.sustain = 0.55f;
-        adsrParams.release = 0.85f;
+        // Warm melodic synth with gentle onset and long tail.
+        adsrParams.attack = 0.010f;
+        adsrParams.decay = 0.36f;
+        adsrParams.sustain = 0.70f;
+        adsrParams.release = 1.05f;
     }
     else if (engine == SynthEngine::velvetNoise)
     {
-        adsrParams.attack = 0.0005f;
-        adsrParams.decay = 0.18f;
+        // Short mallet/xylophone voice.
+        adsrParams.attack = 0.0004f;
+        adsrParams.decay = 0.13f;
         adsrParams.sustain = 0.0f;
-        adsrParams.release = 0.05f;
+        adsrParams.release = 0.025f;
     }
     else
     {
-        adsrParams.attack = 0.005f;
-        adsrParams.decay = 0.22f;
+        // Bright FM with controlled ring.
+        adsrParams.attack = 0.0015f;
+        adsrParams.decay = 0.24f;
         adsrParams.sustain = 0.0f;
-        adsrParams.release = 0.30f;
+        adsrParams.release = 0.26f;
     }
     adsr.setParameters(adsrParams);
     adsr.noteOn();
@@ -261,48 +273,58 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
         float voiced = 0.0f;
         if (engine == SynthEngine::digitalV4)
         {
-            const auto vibrato = 0.008 * std::sin(modAngle * 0.21);
-            const auto fundamental = std::sin(currentAngle + 0.35 * std::sin(modAngle * 0.16) + vibrato);
-            const auto harmonic2 = std::sin(currentAngle * 2.0 + 0.10 * std::sin(modAngle * 0.33));
-            const auto harmonic3 = std::sin(currentAngle * 3.0 + 0.08 * std::sin(modAngle * 0.27));
-            const auto raw = static_cast<float>(0.78 * fundamental + 0.13 * harmonic2 + 0.06 * harmonic3 + 0.10 * sub + click * 0.01f);
+            // Nova Drift: warm two-osc blend with slow motion and velvet top end.
+            const auto drift = 0.013 * std::sin(modAngle * 0.09);
+            const auto oscA = std::sin(currentAngle + drift + 0.18 * std::sin(modAngle * 0.21));
+            const auto oscB = std::sin((currentAngle * 1.0045) + 0.24 * std::sin(modAngle * 0.17 + 0.7));
+            const auto oscC = std::sin(currentAngle * 2.0 + 0.11 * std::sin(modAngle * 0.37));
+            const auto raw = static_cast<float>(0.53 * oscA + 0.27 * oscB + 0.11 * oscC + 0.17 * sub + click * 0.035f);
 
-            // Strongly melodic voicing: low-pass biased with very gentle saturation.
-            const auto cutoff = 180.0f + 1450.0f * env + 420.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.09));
+            const auto cutoff = 220.0f + 1650.0f * env + 350.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.05));
             const auto alpha = std::exp(-juce::MathConstants<float>::twoPi * cutoff / sr);
             lpState = alpha * lpState + (1.0f - alpha) * raw;
             const auto hp = raw - lpState;
-            hpState = 0.97f * hpState + 0.03f * hp;
+            hpState = 0.985f * hpState + 0.015f * hp;
 
-            voiced = std::tanh((0.90f * lpState + 0.06f * hpState + 0.10f * sub) * 0.96f) * 0.66f;
+            voiced = std::tanh((0.92f * lpState + 0.04f * hpState + 0.10f * sub) * 1.05f) * 0.74f;
         }
         else if (engine == SynthEngine::fmGlass)
         {
-            const auto fm = std::sin(currentAngle + 3.2 * std::sin(modAngle * 0.72));
-            const auto air = static_cast<float>(std::sin(modAngle * 1.33 + currentAngle * 0.12));
-            voiced = static_cast<float>(0.76 * fm + 0.19 * sub + 0.05 * air) + click * 0.5f;
-            voiced = std::tanh(voiced * 1.3f) * 0.74f;
+            // Prism FM: inharmonic FM body with decaying index and glassy air partial.
+            const float idx = 3.9f * std::exp(-noteAgeSeconds * 5.3f) + 0.35f;
+            const auto carrier = std::sin(currentAngle + idx * std::sin(modAngle) + 0.22 * std::sin(modAngle * 0.5));
+            const auto side = std::sin(currentAngle * 2.73 + 0.45 * std::sin(modAngle * 1.61));
+            const auto air = std::sin(currentAngle * 5.11 + modAngle * 0.37);
+            const auto raw = static_cast<float>(0.72 * carrier + 0.18 * side + 0.10 * air + click * 0.42f);
+
+            const float hp = raw - lpState;
+            lpState += 0.22f * (raw - lpState);
+            hpState += 0.08f * (hp - hpState);
+            voiced = std::tanh((0.82f * raw + 0.22f * hpState) * 1.22f) * 0.79f;
         }
         else
         {
+            // Mallet Bloom: short woody strike + tuned resonators (xylophone-like).
+            const float toneEnv = std::exp(-noteAgeSeconds * 9.5f);
+            const float metalEnv = std::exp(-noteAgeSeconds * 17.0f);
+            const float strikeEnv = std::exp(-noteAgeSeconds * 95.0f);
+
+            noiseLP += 0.36f * (white - noiseLP);
+            const float strike = (0.72f * white + 0.28f * (white - noiseLP)) * strikeEnv * 0.20f;
+
             const auto fundamental = std::sin(currentAngle);
-            const auto fifth = std::sin(currentAngle * 1.5 + 0.03 * std::sin(modAngle * 0.21));
-            const auto octave = std::sin(currentAngle * 2.0);
-            const auto bellHigh = std::sin(currentAngle * 3.02 + 0.02 * std::sin(modAngle * 0.37));
+            const auto r2 = std::sin(currentAngle * 3.99 + 0.12 * std::sin(modAngle * 0.3));
+            const auto r3 = std::sin(currentAngle * 6.83 + 0.08 * std::sin(modAngle * 0.43));
+            const auto r4 = std::sin(currentAngle * 9.77 + 0.05 * std::sin(modAngle * 0.57));
 
-            const float brightEnv = std::exp(-noteAgeSeconds * 18.0f);
-            const float strike = white * std::exp(-noteAgeSeconds * 75.0f) * 0.012f;
+            const auto body = static_cast<float>(0.74 * fundamental * toneEnv
+                                               + 0.17 * r2 * metalEnv
+                                               + 0.07 * r3 * metalEnv
+                                               + 0.04 * r4 * metalEnv
+                                               + 0.06 * sub * toneEnv);
 
-            const auto chime = static_cast<float>(0.78 * fundamental
-                                                + 0.11 * fifth * brightEnv
-                                                + 0.08 * octave * brightEnv
-                                                + 0.05 * bellHigh * brightEnv
-                                                + 0.04 * sub)
-                             + strike;
-
-            // Keep pitch center crystal clear: strong low-pass emphasis, very soft drive.
-            lpState = 0.90f * lpState + 0.10f * chime;
-            voiced = std::tanh((0.92f * lpState + 0.08f * chime) * 0.92f) * 0.68f;
+            lpState += 0.18f * ((body + strike) - lpState);
+            voiced = std::tanh((0.82f * lpState + 0.18f * body + strike) * 1.34f) * 0.72f;
         }
 
         const float sample = voiced * level * env;
@@ -456,8 +478,11 @@ MainComponent::MainComponent()
     addKeyListener(this);
 
     for (int i = 0; i < 12; ++i)
-        synth.addVoice(new WaveVoice(synthEngine));
+        synth.addVoice(new WaveVoice(synthEngine, bpm, chordLatchMode));
     synth.addSound(new WaveSound());
+    for (int i = 0; i < 6; ++i)
+        beatSynth.addVoice(new WaveVoice(synthEngine, bpm, chordLatchMode));
+    beatSynth.addSound(new WaveSound());
 
     snakeA.colour = juce::Colour(0xff00ffaa);
     snakeB.colour = juce::Colour(0xffffb347);
@@ -484,6 +509,7 @@ void MainComponent::prepareToPlay(int, double sampleRate)
     const juce::ScopedLock sl(synthLock);
     currentSr = sampleRate;
     synth.setCurrentPlaybackSampleRate(sampleRate);
+    beatSynth.setCurrentPlaybackSampleRate(sampleRate);
     miverb.prepare(sampleRate);
     miverb.setMix(miverbMix);
 }
@@ -503,6 +529,9 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         miverb.setTone(0.66f + 0.18f * beatFlash, 0.06f);
         miverb.process(*bufferToFill.buffer, bufferToFill.startSample, bufferToFill.numSamples);
     }
+
+    // Beat layer is rendered post-reverb so it always stays dry/punchy.
+    beatSynth.renderNextBlock(*bufferToFill.buffer, juce::MidiBuffer(), bufferToFill.startSample, bufferToFill.numSamples);
 }
 
 void MainComponent::releaseResources()
@@ -535,6 +564,8 @@ void MainComponent::resetBlankWorld()
     beatFlash = 0.0f;
     screenShake = 0.0f;
     beatStyle = 0;
+    miverbEnabled = false;
+    miverbMix = 0.00f;
     nextBeatLayerBeat = 0.0;
     arrangementEnabled = true;
     arrangementSequenceIndex = 0;
@@ -563,7 +594,7 @@ void MainComponent::loadDemoWorld()
 
     tools[3][3] = { ToolType::speed, 0, 2 };
     tools[6][7] = { ToolType::redirect, 1, 0 };
-    tools[10][11] = { ToolType::ratchet, 0, 2 };
+    tools[10][11] = { ToolType::ratchet, 0, 1 };
     tools[12][5] = { ToolType::section, 0, 1 };
 
     hasSession = true;
@@ -719,6 +750,7 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
             case MenuAction::load: text = "Load Saved File"; break;
             case MenuAction::demo: text = "Start Demo Song"; break;
             case MenuAction::blank: text = "Start Blank World"; break;
+            case MenuAction::quit: text = "Quit"; break;
         }
 
         juce::Rectangle<int> row(panel.getX() + 20, panel.getY() + 65 + static_cast<int>(i) * 56, panel.getWidth() - 40, 42);
@@ -1285,6 +1317,7 @@ std::vector<MainComponent::MenuAction> MainComponent::getTitleMenu() const
     menu.push_back(MenuAction::load);
     menu.push_back(MenuAction::demo);
     menu.push_back(MenuAction::blank);
+    menu.push_back(MenuAction::quit);
     return menu;
 }
 
@@ -1326,6 +1359,12 @@ void MainComponent::performMenuAction(MenuAction action)
         hasVisitedBuildMode = true;
         mode = Mode::build;
     }
+    else if (action == MenuAction::quit)
+    {
+        if (auto* app = juce::JUCEApplicationBase::getInstance())
+            app->systemRequestedQuit();
+        return;
+    }
 
     hasSession = true;
     selectedMenu = 0;
@@ -1355,15 +1394,41 @@ void MainComponent::startPerformanceMode()
 
 void MainComponent::triggerMidi(int midiNote, float velocity, float noteLengthSeconds)
 {
+    triggerMidiDelayed(midiNote, velocity, noteLengthSeconds, 0.0f);
+}
+
+void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteLengthSeconds, float delaySeconds)
+{
     if (midiNote < 0 || midiNote > 127)
         return;
 
     if (midiNote < 120)
+    {
         midiNote = juce::jlimit(0, 127, quantizeMidiToScale(midiNote));
+        midiNote = juce::jlimit(0, 119, midiNote + 12); // global +1 octave for melodic synth voices
+    }
+
+    delaySeconds = juce::jmax(0.0f, delaySeconds);
+    noteLengthSeconds = juce::jmax(0.02f, noteLengthSeconds);
+
+    if (delaySeconds <= 0.0001f)
+    {
+        const juce::ScopedLock sl(synthLock);
+        synth.noteOn(1, midiNote, velocity);
+        pendingNoteOffs.push_back({ midiNote, noteLengthSeconds });
+        return;
+    }
+
+    pendingNoteOns.push_back({ midiNote, velocity, noteLengthSeconds, delaySeconds });
+}
+
+void MainComponent::triggerBeatMidi(int midiNote, float velocity)
+{
+    if (midiNote < 120 || midiNote > 123)
+        return;
 
     const juce::ScopedLock sl(synthLock);
-    synth.noteOn(1, midiNote, velocity);
-    pendingNoteOffs.push_back({ midiNote, noteLengthSeconds });
+    beatSynth.noteOn(1, midiNote, velocity);
 }
 
 void MainComponent::addJuiceAtCell(int x, int y, juce::Colour c, float strength)
@@ -1408,17 +1473,17 @@ void MainComponent::addJuiceAtCell(int x, int y, juce::Colour c, float strength)
     }
 }
 
-void MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet, int gateSection)
+int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet, int gateSection, int snakeRole, int forcedImprovStyle)
 {
     if (x < 0 || y < 0 || x >= worldSize || y >= worldSize)
-        return;
+        return -1;
 
     if (tools[x][y].type == ToolType::section)
     {
         const int taggedSection = juce::jlimit(0, 4, tools[x][y].state);
         const int activeSection = (gateSection >= 0 ? gateSection : activeArrangementSection());
         if (arrangementEnabled && taggedSection != activeSection)
-            return;
+            return -1;
     }
 
     std::vector<int> stack;
@@ -1431,7 +1496,7 @@ void MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteL
     }
 
     if (stack.empty())
-        return;
+        return -1;
 
     int section = activeArrangementSection();
     if (tools[x][y].type == ToolType::section)
@@ -1439,10 +1504,57 @@ void MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteL
 
     const float beatInBar = static_cast<float>(beatCounter % 4) + static_cast<float>(beatPhase);
 
+    const auto applyRoleRegister = [&](int note) -> int
+    {
+        int out = note;
+        if (snakeRole == 1)
+        {
+            // Snake B holds a bass register for stronger call/response contrast.
+            while (out > 55)
+                out -= 12;
+        }
+        else
+        {
+            // Snake A stays above bass to keep parts separated.
+            while (out < 60)
+                out += 12;
+        }
+        return juce::jlimit(24, 108, out);
+    };
+
     const auto pickStackNote = [&]() -> int
     {
-        const int idx = (beatCounter + barCounter * 3 + x * 2 + y + section * 5) % static_cast<int>(stack.size());
-        return stack[static_cast<size_t>(idx)];
+        const int n = static_cast<int>(stack.size());
+        const int baseIdx = (beatCounter + barCounter * 3 + x * 2 + y + section * 5) % n;
+        int idx = baseIdx;
+        if (snakeRole == 1)
+            idx = (n - 1 - baseIdx + n) % n; // mirror for complementary line
+
+        int note = stack[static_cast<size_t>(idx)];
+        if (snakeRole == 1 && n == 1)
+            note += 7; // force a consonant contrast when no alternate stack note exists
+        return applyRoleRegister(note);
+    };
+
+    const auto emitRatcheted = [&](int note, float baseVelocity, float baseLengthSeconds, int jumpSemitones, int repeatsOverride = -1)
+    {
+        const int repeats = juce::jlimit(1, 2, repeatsOverride > 0 ? repeatsOverride : ratchet);
+        const float spacing = juce::jmax(0.012f, baseLengthSeconds / static_cast<float>(juce::jmax(1, repeats)));
+        for (int i = 0; i < repeats; ++i)
+        {
+            int stepped = note;
+            if (i > 0)
+            {
+                const int stepMul = (i % 2 == 1) ? 1 : 2;
+                const int dir = ((x + y + barCounter + snakeRole + i) & 1) == 0 ? 1 : -1;
+                stepped += dir * stepMul * jumpSemitones;
+            }
+
+            const float v = baseVelocity * juce::jmax(0.30f, 1.0f - 0.14f * static_cast<float>(i));
+            const float l = juce::jmax(0.028f, spacing * 0.85f * (1.0f - 0.06f * static_cast<float>(i)));
+            const float d = spacing * static_cast<float>(i);
+            triggerMidiDelayed(applyRoleRegister(stepped), v, l, d);
+        }
     };
 
     const auto triggerChordFromStack = [&](float velScale)
@@ -1450,8 +1562,16 @@ void MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteL
         std::vector<int> chosen;
         chosen.reserve(4);
 
-        for (int i = static_cast<int>(stack.size()) - 1; i >= 0 && static_cast<int>(chosen.size()) < 4; --i)
-            chosen.push_back(stack[static_cast<size_t>(i)]);
+        if (snakeRole == 0)
+        {
+            for (int i = static_cast<int>(stack.size()) - 1; i >= 0 && static_cast<int>(chosen.size()) < 4; --i)
+                chosen.push_back(stack[static_cast<size_t>(i)]);
+        }
+        else
+        {
+            for (int i = 0; i < static_cast<int>(stack.size()) && static_cast<int>(chosen.size()) < 4; ++i)
+                chosen.push_back(stack[static_cast<size_t>(i)]);
+        }
 
         if (chosen.size() == 1)
         {
@@ -1463,14 +1583,15 @@ void MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteL
             chosen.push_back(chosen[0] + 7);
         }
 
-        const float fadeStart = (beatInBar < 2.0f ? 2.0f : (beatInBar < 3.0f ? 3.0f : beatInBar));
-        const float releaseBeats = juce::jmax(0.05f, 4.0f - fadeStart);
-        const float chordReleaseSeconds = releaseBeats * (60.0f / static_cast<float>(juce::jmax(1.0, bpm)));
+        const float secondsPerBeat = 60.0f / static_cast<float>(juce::jmax(1.0, bpm));
+        const float beatsUntilBeat4 = juce::jmax(0.0f, 3.0f - beatInBar);
+        const float gateUntilBeat4Seconds = juce::jmax(0.01f, beatsUntilBeat4 * secondsPerBeat);
+        const auto latchGuard = juce::ScopedValueSetter<bool>(chordLatchMode, true);
 
         for (size_t i = 0; i < chosen.size(); ++i)
         {
             const float vv = velocity * velScale * (0.98f - static_cast<float>(i) * 0.12f);
-            triggerMidi(chosen[i], vv, juce::jmax(noteLengthSeconds * 1.4f, chordReleaseSeconds));
+            triggerMidi(applyRoleRegister(chosen[i]), vv, gateUntilBeat4Seconds);
         }
     };
 
@@ -1480,104 +1601,115 @@ void MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteL
         std::sort(arp.begin(), arp.end());
 
         const int directionMode = (barCounter + x * 2 + y * 3 + section) % 3;
-        if (directionMode == 1)
+        const int appliedDirection = (snakeRole == 1 ? (directionMode + 1) % 3 : directionMode); // opposite tendency
+        if (appliedDirection == 1)
         {
             std::reverse(arp.begin(), arp.end());
         }
-        else if (directionMode == 2 && arp.size() >= 3)
+        else if (appliedDirection == 2 && arp.size() >= 3)
         {
             for (int i = static_cast<int>(arp.size()) - 2; i > 0; --i)
                 arp.push_back(arp[static_cast<size_t>(i)]);
         }
 
-        const int idx = (beatCounter + x + y) % static_cast<int>(arp.size());
+        const int idx = (beatCounter + x + y + snakeRole) % static_cast<int>(arp.size());
         const int note = arp[static_cast<size_t>(idx)];
-        triggerMidi(note, velocity, noteLengthSeconds);
+        emitRatcheted(note, velocity, noteLengthSeconds, snakeRole == 1 ? 5 : 7);
 
         if (arp.size() > 1)
         {
             const int next = arp[static_cast<size_t>((idx + 1) % static_cast<int>(arp.size()))];
-            triggerMidi(next, velocity * 0.72f, noteLengthSeconds * 0.72f);
+            emitRatcheted(next, velocity * 0.72f, noteLengthSeconds * 0.72f, snakeRole == 1 ? 5 : 7, juce::jmax(1, ratchet - 1));
         }
     };
 
-    if (playMode == PlayMode::chord)
+    // Always improvise on stack hits: choose single/chord/arp musically.
+    enum class ImprovStyle { single, chord, arp };
+    ImprovStyle style = ImprovStyle::single;
+    if (stack.size() > 1)
     {
-        triggerChordFromStack(1.0f);
-    }
-    else if (playMode == PlayMode::arpeggio)
-    {
-        triggerArpFromStack();
-    }
-    else
-    {
-        // Section-aware co-op improvisation: blend single/chord/arp by arrangement section and bar phase.
-        enum class ImprovStyle { single, chord, arp };
-        ImprovStyle style = ImprovStyle::single;
-        if (stack.size() > 1)
+        int singleW = 56;
+        int chordW = 30;
+        int arpW = 14;
+
+        switch (section)
         {
-            int singleW = 56;
-            int chordW = 30;
-            int arpW = 14;
+            case 0: singleW = 74; chordW = 22; arpW = 4; break;
+            case 1: singleW = 56; chordW = 30; arpW = 14; break;
+            case 2: singleW = 40; chordW = 35; arpW = 25; break;
+            case 3: singleW = 28; chordW = 48; arpW = 24; break;
+            case 4: singleW = 36; chordW = 24; arpW = 40; break;
+            default: break;
+        }
 
-            switch (section)
-            {
-                case 0: singleW = 74; chordW = 22; arpW = 4; break;
-                case 1: singleW = 56; chordW = 30; arpW = 14; break;
-                case 2: singleW = 40; chordW = 35; arpW = 25; break;
-                case 3: singleW = 28; chordW = 48; arpW = 24; break;
-                case 4: singleW = 36; chordW = 24; arpW = 40; break;
-                default: break;
-            }
+        const int beatSlot = juce::jlimit(0, 3, static_cast<int>(std::floor(beatInBar)));
+        if (beatSlot == 0)
+        {
+            singleW += 10;
+            arpW -= 8;
+        }
+        else if (beatSlot == 3)
+        {
+            singleW -= 10;
+            chordW += 6;
+            arpW += 8;
+        }
+        else if (beatSlot == 1 && section >= 2)
+        {
+            singleW -= 4;
+            arpW += 6;
+        }
 
-            const int beatSlot = juce::jlimit(0, 3, static_cast<int>(std::floor(beatInBar)));
-            if (beatSlot == 0)
-            {
-                singleW += 10;
-                arpW -= 8;
-            }
-            else if (beatSlot == 3)
-            {
-                singleW -= 10;
-                chordW += 6;
-                arpW += 8;
-            }
-            else if (beatSlot == 1 && section >= 2)
-            {
-                singleW -= 4;
-                arpW += 6;
-            }
+        // Keep play mode relevant as a bias, not a hard lock.
+        if (playMode == PlayMode::chord)
+        {
+            chordW += 22;
+            singleW -= 12;
+            arpW -= 10;
+        }
+        else if (playMode == PlayMode::arpeggio)
+        {
+            arpW += 24;
+            singleW -= 12;
+            chordW -= 8;
+        }
 
-            singleW = juce::jmax(5, singleW);
-            chordW = juce::jmax(5, chordW);
-            arpW = juce::jmax(5, arpW);
-            const int total = singleW + chordW + arpW;
+        singleW = juce::jmax(5, singleW);
+        chordW = juce::jmax(5, chordW);
+        arpW = juce::jmax(5, arpW);
+        const int total = singleW + chordW + arpW;
 
+        if (forcedImprovStyle >= 0 && forcedImprovStyle <= 2)
+        {
+            style = static_cast<ImprovStyle>(forcedImprovStyle);
+        }
+        else
+        {
             const int pick = (beatCounter * 11 + barCounter * 17 + x * 13 + y * 19
-                            + static_cast<int>(stack.size()) * 23 + section * 29) % total;
+                            + static_cast<int>(stack.size()) * 23 + section * 29 + snakeRole * 31) % total;
             if (pick < singleW) style = ImprovStyle::single;
             else if (pick < (singleW + chordW)) style = ImprovStyle::chord;
             else style = ImprovStyle::arp;
         }
+    }
 
-        if (style == ImprovStyle::single)
-        {
-            const int note = pickStackNote();
-            for (int i = 0; i < ratchet; ++i)
-                triggerMidi(note + (i % 2 == 1 ? 12 : 0), velocity * (0.95f - i * 0.12f), noteLengthSeconds / juce::jmax(1, ratchet));
-        }
-        else if (style == ImprovStyle::chord)
-        {
-            triggerChordFromStack(0.92f);
-        }
-        else
-        {
-            triggerArpFromStack();
-        }
+    if (style == ImprovStyle::single)
+    {
+        const int note = pickStackNote();
+        emitRatcheted(note, velocity, noteLengthSeconds, snakeRole == 1 ? 7 : 12);
+    }
+    else if (style == ImprovStyle::chord)
+    {
+        triggerChordFromStack(0.92f);
+    }
+    else
+    {
+        triggerArpFromStack();
     }
 
     const int top = topBlockZ(x, y);
     addJuiceAtCell(x, y, pitchClassColour((juce::jmax(1, top) - 1) % 12), juce::jlimit(0.4f, 1.5f, velocity * (0.8f + 0.2f * ratchet)));
+    return static_cast<int>(style);
 }
 
 void MainComponent::applyToolToSnake(Snake& snake)
@@ -1598,7 +1730,7 @@ void MainComponent::applyToolToSnake(Snake& snake)
             snake.speedState = juce::jlimit(0, 2, t.state);
             break;
         case ToolType::ratchet:
-            snake.ratchet = juce::jlimit(1, 4, t.state + 1);
+            snake.ratchet = juce::jlimit(1, 2, t.state + 1);
             break;
         case ToolType::key:
             keyRoot = juce::jlimit(0, 11, t.state);
@@ -1630,11 +1762,11 @@ void MainComponent::applyToolToSnake(Snake& snake)
 void MainComponent::advancePerformanceStep()
 {
     ++performanceStepCounter;
-    auto stepSnake = [&](Snake& s)
+    auto stepSnake = [&](Snake& s, int snakeRole, int forcedImprovStyle) -> int
     {
         const int divisor = s.speedState == 0 ? 4 : s.speedState == 1 ? 2 : 1;
         if ((performanceStepCounter % divisor) != 0)
-            return;
+            return -1;
 
         auto next = s.cell + s.dir;
         if (next.x < 0 || next.x >= worldSize)
@@ -1663,17 +1795,21 @@ void MainComponent::advancePerformanceStep()
 
         const int stepSection = activeArrangementSection();
         applyToolToSnake(s);
-        triggerNoteForCell(s.cell.x, s.cell.y, 0.9f, 0.18f, s.ratchet, stepSection);
+        const int chosenStyle = triggerNoteForCell(s.cell.x, s.cell.y, 0.9f, 0.18f, s.ratchet, stepSection, snakeRole, forcedImprovStyle);
 
         const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
         const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
         const juce::Point<float> origin(bounds.getCentreX() - cell * worldSize * 0.5f,
                                         bounds.getCentreY() - cell * worldSize * 0.5f);
         pulses.push_back({ { origin.x + (s.cell.x + 0.5f) * cell, origin.y + (s.cell.y + 0.5f) * cell }, 0.0f, 0.4f, s.colour, 1.0f + s.ratchet * 0.24f });
+        return chosenStyle;
     };
 
-    stepSnake(snakeA);
-    stepSnake(snakeB);
+    const int styleA = stepSnake(snakeA, 0, -1);
+    int forcedB = -1;
+    if (styleA >= 0)
+        forcedB = (styleA + 1 + ((performanceStepCounter + barCounter) & 1)) % 3;
+    stepSnake(snakeB, 1, forcedB);
 }
 
 void MainComponent::advanceTransport(double deltaSeconds)
@@ -1734,6 +1870,22 @@ void MainComponent::timerCallback()
     titlePhase += static_cast<float>(delta * 2.4);
 
     advanceTransport(delta);
+
+    for (auto it = pendingNoteOns.begin(); it != pendingNoteOns.end();)
+    {
+        it->secondsRemaining -= static_cast<float>(delta);
+        if (it->secondsRemaining <= 0.0f)
+        {
+            const juce::ScopedLock sl(synthLock);
+            synth.noteOn(1, it->note, it->velocity);
+            pendingNoteOffs.push_back({ it->note, it->lengthSeconds });
+            it = pendingNoteOns.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 
     for (auto it = pendingNoteOffs.begin(); it != pendingNoteOffs.end();)
     {
@@ -2024,7 +2176,7 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
         else if (t.type == ToolType::speed)
             t.state = (t.state + 1) % 3;
         else if (t.type == ToolType::ratchet)
-            t.state = (t.state + 1) % 4;
+            t.state = (t.state + 1) % 2;
         else if (t.type == ToolType::key)
             t.state = (t.state + 1) % 12;
         else if (t.type == ToolType::scale)
@@ -2142,7 +2294,7 @@ void MainComponent::saveWorldToFileAs()
     juce::File defaultFile = worldSaveFile();
     saveAsChooser = std::make_unique<juce::FileChooser>("Save KlangKunst World As",
                                                          defaultFile,
-                                                         "*.klangkunst.json");
+                                                         "*.mat");
 
     constexpr int flags = juce::FileBrowserComponent::saveMode
                         | juce::FileBrowserComponent::canSelectFiles
@@ -2157,8 +2309,8 @@ void MainComponent::saveWorldToFileAs()
         juce::File target = chooser.getResult();
         if (target != juce::File())
         {
-            if (! target.hasFileExtension("json"))
-                target = target.withFileExtension(".klangkunst.json");
+            if (! target.hasFileExtension("mat"))
+                target = target.withFileExtension(".mat");
 
             safeThis->writeWorldToFile(target);
             safeThis->hasSession = true;
@@ -2346,7 +2498,7 @@ void MainComponent::triggerBeatLayer(double beatTime)
 
     auto hit = [this] (int midiNote, float velocity)
     {
-        triggerMidi(midiNote, juce::jlimit(0.0f, 1.0f, velocity * 1.20f), 0.05f);
+        triggerBeatMidi(midiNote, juce::jlimit(0.0f, 1.0f, velocity * 1.20f));
     };
 
     switch (beatStyle)
