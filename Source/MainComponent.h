@@ -32,7 +32,7 @@ public:
     enum class ToolType { none, redirect, speed, ratchet, key, scale, section };
     enum class ScaleType { chromatic, major, minor, dorian, pentatonic };
     enum class PlayMode { melodic, chord, arpeggio };
-    enum class SynthEngine { digitalV4, fmGlass, velvetNoise, chipPulse, ovalGlitch };
+    enum class SynthEngine { digitalV4, fmGlass, velvetNoise, chipPulse, ovalGlitch, guitarPluck };
     enum class PerformanceMode { a, b };
 private:
 
@@ -138,6 +138,9 @@ private:
         float ovalSkipSampleHold = 0.0f;
         int ovalSkipDecimCounter = 0;
         int ovalSkipDecimPeriod = 1;
+        std::vector<float> ksDelay;
+        int ksIndex = 0;
+        float ksLast = 0.0f;
     };
 
     class WaveSound final : public juce::SynthesiserSound
@@ -216,6 +219,8 @@ private:
     void paintTitle(juce::Graphics& g);
     void paintBuild(juce::Graphics& g);
     void paintPerformance(juce::Graphics& g);
+    void drawBuildBackground(juce::Graphics& g);
+    void drawPerformanceBackground(juce::Graphics& g);
 
     void drawTitleLiveOverlays(juce::Graphics& g);
     void drawBuildOverlays(juce::Graphics& g);

@@ -55,6 +55,7 @@ juce::String synthToString(MainComponent::SynthEngine s)
         case MainComponent::SynthEngine::velvetNoise: return "Mallet Bloom";
         case MainComponent::SynthEngine::chipPulse: return "Arcade Pulse";
         case MainComponent::SynthEngine::ovalGlitch: return "Oval Glitch";
+        case MainComponent::SynthEngine::guitarPluck: return "Guitar Pluck";
     }
     return "Nova Drift";
 }
@@ -74,7 +75,7 @@ MainComponent::PlayMode nextPlayMode(MainComponent::PlayMode p)
 MainComponent::SynthEngine nextSynth(MainComponent::SynthEngine s)
 {
     const int v = static_cast<int>(s);
-    return static_cast<MainComponent::SynthEngine>((v + 1) % 5);
+    return static_cast<MainComponent::SynthEngine>((v + 1) % 6);
 }
 
 juce::File worldSaveFile()
@@ -135,6 +136,8 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         modDelta = cyclesPerSample * 4.0 * juce::MathConstants<double>::twoPi;
     else if (engine == SynthEngine::ovalGlitch)
         modDelta = cyclesPerSample * 2.414 * juce::MathConstants<double>::twoPi;
+    else if (engine == SynthEngine::guitarPluck)
+        modDelta = cyclesPerSample * 2.01 * juce::MathConstants<double>::twoPi;
     else
         modDelta = cyclesPerSample * 1.997 * juce::MathConstants<double>::twoPi;
     subDelta = cyclesPerSample * 0.5 * juce::MathConstants<double>::twoPi;
@@ -170,6 +173,9 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     ovalSkipSampleHold = 0.0f;
     ovalSkipDecimCounter = 0;
     ovalSkipDecimPeriod = 1;
+    ksDelay.clear();
+    ksIndex = 0;
+    ksLast = 0.0f;
 
     if (! percussionMode && engine == SynthEngine::chipPulse)
     {
@@ -177,6 +183,21 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         chipSfxType = juce::jlimit(0, 3, static_cast<int>(encoded * 4.0f));
         const float decodedLevel = (encoded - 0.25f * static_cast<float>(chipSfxType)) * 4.0f;
         level = juce::jlimit(0.0f, 1.0f, decodedLevel);
+    }
+
+    if (! percussionMode && engine == SynthEngine::guitarPluck)
+    {
+        const double hz = juce::jmax(30.0, cyclesPerSecond);
+        const int ksLen = juce::jlimit(16, 4096, static_cast<int>(std::round(currentSampleRate / hz)));
+        ksDelay.resize(static_cast<size_t>(ksLen), 0.0f);
+        ksIndex = 0;
+        ksLast = 0.0f;
+        for (int i = 0; i < ksLen; ++i)
+        {
+            noiseSeed = noiseSeed * 1664525u + 1013904223u;
+            const float n = static_cast<float>((noiseSeed >> 9) & 0x7FFFFFu) / 4194303.5f * 2.0f - 1.0f;
+            ksDelay[static_cast<size_t>(i)] = n * (0.70f * velocity);
+        }
     }
 
     if (percussionMode)
@@ -226,6 +247,14 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         adsrParams.decay = 0.050f;
         adsrParams.sustain = 0.03f;
         adsrParams.release = 0.035f;
+    }
+    else if (engine == SynthEngine::guitarPluck)
+    {
+        // Guitar-like pluck with short pick transient and warm decay.
+        adsrParams.attack = 0.0004f;
+        adsrParams.decay = 0.17f;
+        adsrParams.sustain = 0.12f;
+        adsrParams.release = 0.14f;
     }
     else if (engine == SynthEngine::fmGlass)
     {
@@ -493,6 +522,35 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
             const float hp = raw - lpState;
             hpState = 0.986f * hpState + 0.014f * hp;
             voiced = static_cast<float>(std::tanh((0.80f * lpState + 0.20f * hpState) * 1.12f) * 0.74f);
+        }
+        else if (engine == SynthEngine::guitarPluck)
+        {
+            // Guitar Pluck: Karplus-Strong style string loop with damping.
+            if (ksDelay.empty())
+            {
+                voiced = 0.0f;
+            }
+            else
+            {
+                const int n = static_cast<int>(ksDelay.size());
+                const int nextIdx = (ksIndex + 1) % n;
+                const float y0 = ksDelay[static_cast<size_t>(ksIndex)];
+                const float y1 = ksDelay[static_cast<size_t>(nextIdx)];
+                const float avg = 0.5f * (y0 + y1);
+                const float damping = 0.9925f - 0.012f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.04));
+                const float pickBurst = (white - noiseLP) * std::exp(-noteAgeSeconds * 62.0f) * 0.040f;
+                noiseLP += 0.25f * (white - noiseLP);
+                const float write = avg * damping + pickBurst;
+
+                ksDelay[static_cast<size_t>(ksIndex)] = write;
+                ksIndex = nextIdx;
+
+                const float body = 0.82f * y0 + 0.12f * sub + 0.08f * click;
+                lpState += 0.14f * (body - lpState);
+                hpState += 0.010f * ((body - lpState) - hpState);
+                voiced = static_cast<float>(std::tanh((0.92f * lpState + 0.05f * hpState + 0.08f * ksLast) * 1.12f) * 0.72f);
+                ksLast = y0;
+            }
         }
         else
         {
@@ -1207,11 +1265,24 @@ void MainComponent::updateBuildCache()
 
     buildCache = juce::Image(juce::Image::RGB, getWidth(), getHeight(), true);
     juce::Graphics g(buildCache);
-    g.fillAll(juce::Colour(0xff0c0f15));
+    g.fillAll(juce::Colour(0xff050913));
+
+    // Draw animated back layer into cache first, so floor/cubes always sit on top.
+    drawBuildBackground(g);
 
     const float tileW = 64.0f;
     const float tileH = 32.0f;
     const juce::Point<float> origin = getBuildOrigin(tileW, tileH);
+
+    // Opaque floor plane so background FX never bleed through the build world.
+    juce::Path floorDiamond;
+    floorDiamond.startNewSubPath(isoToScreen(0, 0, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.lineTo(isoToScreen(worldSize, 0, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.lineTo(isoToScreen(worldSize, worldSize, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.lineTo(isoToScreen(0, worldSize, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.closeSubPath();
+    g.setColour(juce::Colour(0xff091126));
+    g.fillPath(floorDiamond);
 
     for (int gx = 0; gx <= worldSize; ++gx)
     {
@@ -1388,6 +1459,80 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
     }
 }
 
+void MainComponent::drawBuildBackground(juce::Graphics& g)
+{
+    const float tileW = 64.0f;
+    const float tileH = 32.0f;
+    const juce::Point<float> origin = getBuildOrigin(tileW, tileH);
+
+    juce::Path floorDiamond;
+    floorDiamond.startNewSubPath(isoToScreen(0, 0, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.lineTo(isoToScreen(worldSize, 0, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.lineTo(isoToScreen(worldSize, worldSize, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.lineTo(isoToScreen(0, worldSize, 0, tileW, tileH, origin, viewRotation));
+    floorDiamond.closeSubPath();
+
+    const auto centre = floorDiamond.getBounds().getCentre();
+    const float phase = titlePhase * 0.72f;
+    const float beatBoost = 0.55f + beatFlash * 1.15f;
+
+    // Full-frame back wash: keep subtle so cubes remain dominant.
+    juce::ColourGradient wash(juce::Colour::fromRGBA(4, 18, 52, 255),
+                              centre.x, centre.y - 280.0f,
+                              juce::Colour::fromRGBA(8, 46, 98, 255),
+                              centre.x, centre.y + 320.0f,
+                              false);
+    wash.addColour(0.55, juce::Colour::fromRGBA(10, 38, 104, static_cast<uint8_t>(145.0f + 42.0f * beatBoost)));
+    g.setGradientFill(wash);
+    g.fillRect(getLocalBounds());
+
+    // Beat-reactive core glow.
+    g.setColour(juce::Colour::fromRGBA(12, 92, 210, static_cast<uint8_t>(24.0f + 34.0f * beatBoost)));
+    g.fillEllipse(centre.x - 380.0f, centre.y - 260.0f, 760.0f, 520.0f);
+    g.setColour(juce::Colour::fromRGBA(10, 56, 166, static_cast<uint8_t>(20.0f + 24.0f * beatBoost)));
+    g.fillEllipse(centre.x - 620.0f, centre.y - 420.0f, 1240.0f, 840.0f);
+
+    // Rez-style rotating wire polygons, kept subtle to stay behind gameplay.
+    for (int ring = 0; ring < 22; ++ring)
+    {
+        const float t = static_cast<float>(ring) / 21.0f;
+        const float radius = 90.0f + t * 740.0f;
+        const float rot = phase * (0.74f + t * 0.62f) + t * 2.55f;
+        juce::Path poly;
+        const int sides = 6 + (ring % 6);
+        for (int i = 0; i < sides; ++i)
+        {
+            const float a = rot + juce::MathConstants<float>::twoPi * (static_cast<float>(i) / static_cast<float>(sides));
+            const juce::Point<float> p(centre.x + std::cos(a) * radius,
+                                       centre.y + std::sin(a) * radius * (0.64f + 0.10f * std::sin(phase + t * 4.0f)));
+            if (i == 0) poly.startNewSubPath(p);
+            else poly.lineTo(p);
+        }
+        poly.closeSubPath();
+        g.setColour(juce::Colour::fromHSV(std::fmod(0.57f + phase * 0.02f + t * 0.18f, 1.0f),
+                                          0.9f,
+                                          0.9f,
+                                          0.042f + 0.060f * (1.0f - t) * beatBoost));
+        g.strokePath(poly, juce::PathStrokeType(1.6f + 1.5f * (1.0f - t)));
+    }
+
+    // Radial spoke bursts to push Rez-like pulse energy.
+    for (int i = 0; i < 64; ++i)
+    {
+        const float t = static_cast<float>(i) / 63.0f;
+        const float a = phase * (0.8f + 0.35f * std::sin(t * 9.0f)) + t * juce::MathConstants<float>::twoPi;
+        const float r0 = 30.0f + 120.0f * t;
+        const float r1 = 340.0f + 560.0f * t;
+        const juce::Point<float> fromPt(centre.x + std::cos(a) * r0, centre.y + std::sin(a) * r0 * 0.68f);
+        const juce::Point<float> toPt(centre.x + std::cos(a) * r1, centre.y + std::sin(a) * r1 * 0.68f);
+        g.setColour(juce::Colour::fromHSV(std::fmod(0.52f + t * 0.28f + phase * 0.01f, 1.0f),
+                                          0.95f,
+                                          0.98f,
+                                          0.022f + 0.040f * beatBoost * (1.0f - t)));
+        g.drawLine(fromPt.x, fromPt.y, toPt.x, toPt.y, 0.8f + 1.5f * (1.0f - t));
+    }
+}
+
 void MainComponent::paintBuild(juce::Graphics& g)
 {
     updateBuildCache();
@@ -1399,6 +1544,65 @@ void MainComponent::paintBuild(juce::Graphics& g)
     drawBuildOverlays(g);
 }
 
+void MainComponent::drawPerformanceBackground(juce::Graphics& g)
+{
+    const auto area = getLocalBounds().toFloat();
+    const auto centre = area.getCentre();
+    const float phase = titlePhase * 0.95f;
+    const float beatBoost = 0.35f + beatFlash * 0.85f;
+
+    const bool modeB = (performanceMode == PerformanceMode::b);
+
+    // Distinct mode palettes:
+    // A: magenta/cyan, B: amber/lime.
+    const juce::Colour c0 = modeB ? juce::Colour::fromRGB(28, 22, 8) : juce::Colour::fromRGB(14, 8, 34);
+    const juce::Colour c1 = modeB ? juce::Colour::fromRGB(92, 66, 14) : juce::Colour::fromRGB(60, 18, 96);
+    const juce::Colour lineA = modeB ? juce::Colour::fromRGB(255, 196, 54) : juce::Colour::fromRGB(255, 84, 214);
+    const juce::Colour lineB = modeB ? juce::Colour::fromRGB(164, 255, 84) : juce::Colour::fromRGB(72, 236, 255);
+
+    juce::ColourGradient wash(c0, centre.x, centre.y - 420.0f,
+                              c1, centre.x, centre.y + 460.0f, false);
+    wash.addColour(0.55, modeB ? juce::Colour::fromRGBA(146, 108, 20, static_cast<uint8_t>(72.0f + 30.0f * beatBoost))
+                               : juce::Colour::fromRGBA(90, 40, 160, static_cast<uint8_t>(72.0f + 30.0f * beatBoost)));
+    g.setGradientFill(wash);
+    g.fillRect(area);
+
+    // Rotating polygon gates.
+    for (int ring = 0; ring < 14; ++ring)
+    {
+        const float t = static_cast<float>(ring) / 13.0f;
+        const float radius = 120.0f + t * 900.0f;
+        const float rot = phase * (0.6f + t * 0.55f) + t * 2.35f;
+        const int sides = 5 + (ring % 7);
+        juce::Path poly;
+        for (int i = 0; i < sides; ++i)
+        {
+            const float a = rot + juce::MathConstants<float>::twoPi * (static_cast<float>(i) / static_cast<float>(sides));
+            const juce::Point<float> p(centre.x + std::cos(a) * radius,
+                                       centre.y + std::sin(a) * radius * (0.58f + 0.12f * std::sin(phase + t * 3.2f)));
+            if (i == 0) poly.startNewSubPath(p);
+            else poly.lineTo(p);
+        }
+        poly.closeSubPath();
+        const juce::Colour lc = lineA.interpolatedWith(lineB, t).withAlpha(0.016f + 0.035f * (1.0f - t) * beatBoost);
+        g.setColour(lc);
+        g.strokePath(poly, juce::PathStrokeType(0.8f + 1.1f * (1.0f - t)));
+    }
+
+    // Spoke/radar burst.
+    for (int i = 0; i < 32; ++i)
+    {
+        const float t = static_cast<float>(i) / 31.0f;
+        const float a = phase * (0.75f + 0.28f * std::sin(t * 8.0f)) + t * juce::MathConstants<float>::twoPi;
+        const float r0 = 40.0f + 130.0f * t;
+        const float r1 = 420.0f + 760.0f * t;
+        const juce::Point<float> pFrom(centre.x + std::cos(a) * r0, centre.y + std::sin(a) * r0 * 0.64f);
+        const juce::Point<float> pTo(centre.x + std::cos(a) * r1, centre.y + std::sin(a) * r1 * 0.64f);
+        g.setColour(lineB.withAlpha(0.009f + 0.022f * beatBoost * (1.0f - t)));
+        g.drawLine(pFrom.x, pFrom.y, pTo.x, pTo.y, 0.5f + 0.9f * (1.0f - t));
+    }
+}
+
 void MainComponent::updatePerformanceCache()
 {
     if (! performanceCacheDirty && performanceCache.isValid() &&
@@ -1408,11 +1612,14 @@ void MainComponent::updatePerformanceCache()
     performanceCache = juce::Image(juce::Image::RGB, getWidth(), getHeight(), true);
     juce::Graphics g(performanceCache);
     g.fillAll(juce::Colour(0xff090d14));
+    drawPerformanceBackground(g); // Bake background behind gameplay into cache for strict layering.
 
     const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
     const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
     const juce::Point<float> origin(bounds.getCentreX() - cell * worldSize * 0.5f,
                                     bounds.getCentreY() - cell * worldSize * 0.5f);
+    g.setColour(juce::Colour(0xff0f1725)); // Opaque square playfield only (no side-band artifacts).
+    g.fillRect(juce::Rectangle<float>(origin.x, origin.y, cell * worldSize, cell * worldSize));
 
     for (int y = 0; y < worldSize; ++y)
     {
@@ -1420,7 +1627,7 @@ void MainComponent::updatePerformanceCache()
         {
             juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
             const auto rr = r.reduced(1.0f);
-            g.setColour(juce::Colour(0xff141b28));
+            g.setColour(juce::Colour(0xff111a2a));
             g.fillRect(rr);
 
             std::vector<int> stack;
@@ -1437,13 +1644,13 @@ void MainComponent::updatePerformanceCache()
                     // Lower notes are shown in lower bands.
                     const float yBand = rr.getY() + rr.getHeight() - bandH * static_cast<float>(i + 1);
                     juce::Rectangle<float> band(rr.getX(), yBand, rr.getWidth(), bandH);
-                    g.setColour(pitchClassColour((stack[i] - 1) % 12).brighter(0.25f).withAlpha(0.60f));
+                    g.setColour(pitchClassColour((stack[i] - 1) % 12).brighter(0.30f).withAlpha(0.80f));
                     g.fillRect(band);
                 }
             }
 
-            g.setColour(juce::Colour(0xff263041));
-            g.drawRect(r, 1.0f);
+            g.setColour(juce::Colour(0xff36506c));
+            g.drawRect(r, 1.25f);
         }
     }
 
@@ -1738,6 +1945,7 @@ void MainComponent::startPerformanceMode(PerformanceMode targetMode)
     {
         modeASnakeCount = 1;
     }
+    performanceCacheDirty = true;
     addJuiceAtCell(worldSize / 2, worldSize / 2, juce::Colour(0xff00ffe5), 1.4f);
     repaint();
 }
@@ -2404,6 +2612,10 @@ void MainComponent::timerCallback()
 
     if (mode == Mode::title)
         titleCacheDirty = true;
+    else if (mode == Mode::build)
+        buildCacheDirty = true;
+    else if (mode == Mode::performance)
+        performanceCacheDirty = true;
 
     repaint();
 }
@@ -2776,6 +2988,7 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
                 for (auto& v : col)
                     v = 0;
         }
+        performanceCacheDirty = true;
         addJuiceAtCell(worldSize / 2, worldSize / 2, juce::Colour(0xff00fff2), 0.9f);
     }
     else if ((c == 'i' || c == 'I') && performanceMode == PerformanceMode::a)
