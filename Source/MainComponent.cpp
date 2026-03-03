@@ -1474,7 +1474,6 @@ void MainComponent::drawBuildBackground(juce::Graphics& g)
 
     const auto centre = floorDiamond.getBounds().getCentre();
     const float phase = titlePhase * 0.72f;
-    const float beatBoost = 0.55f + beatFlash * 1.15f;
 
     // Full-frame back wash: keep subtle so cubes remain dominant.
     juce::ColourGradient wash(juce::Colour::fromRGBA(4, 18, 52, 255),
@@ -1482,14 +1481,14 @@ void MainComponent::drawBuildBackground(juce::Graphics& g)
                               juce::Colour::fromRGBA(8, 46, 98, 255),
                               centre.x, centre.y + 320.0f,
                               false);
-    wash.addColour(0.55, juce::Colour::fromRGBA(10, 38, 104, static_cast<uint8_t>(145.0f + 42.0f * beatBoost)));
+    wash.addColour(0.55, juce::Colour::fromRGBA(10, 38, 104, 156));
     g.setGradientFill(wash);
     g.fillRect(getLocalBounds());
 
-    // Beat-reactive core glow.
-    g.setColour(juce::Colour::fromRGBA(12, 92, 210, static_cast<uint8_t>(24.0f + 34.0f * beatBoost)));
+    // Static core glow (no beat flashing).
+    g.setColour(juce::Colour::fromRGBA(12, 92, 210, 34));
     g.fillEllipse(centre.x - 380.0f, centre.y - 260.0f, 760.0f, 520.0f);
-    g.setColour(juce::Colour::fromRGBA(10, 56, 166, static_cast<uint8_t>(20.0f + 24.0f * beatBoost)));
+    g.setColour(juce::Colour::fromRGBA(10, 56, 166, 28));
     g.fillEllipse(centre.x - 620.0f, centre.y - 420.0f, 1240.0f, 840.0f);
 
     // Rez-style rotating wire polygons, kept subtle to stay behind gameplay.
@@ -1512,7 +1511,7 @@ void MainComponent::drawBuildBackground(juce::Graphics& g)
         g.setColour(juce::Colour::fromHSV(std::fmod(0.57f + phase * 0.02f + t * 0.18f, 1.0f),
                                           0.9f,
                                           0.9f,
-                                          0.042f + 0.060f * (1.0f - t) * beatBoost));
+                                          0.052f + 0.030f * (1.0f - t)));
         g.strokePath(poly, juce::PathStrokeType(1.6f + 1.5f * (1.0f - t)));
     }
 
@@ -1528,7 +1527,7 @@ void MainComponent::drawBuildBackground(juce::Graphics& g)
         g.setColour(juce::Colour::fromHSV(std::fmod(0.52f + t * 0.28f + phase * 0.01f, 1.0f),
                                           0.95f,
                                           0.98f,
-                                          0.022f + 0.040f * beatBoost * (1.0f - t)));
+                                          0.028f + 0.020f * (1.0f - t)));
         g.drawLine(fromPt.x, fromPt.y, toPt.x, toPt.y, 0.8f + 1.5f * (1.0f - t));
     }
 }
