@@ -134,7 +134,7 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     else if (engine == SynthEngine::chipPulse)
         modDelta = cyclesPerSample * 4.0 * juce::MathConstants<double>::twoPi;
     else if (engine == SynthEngine::ovalGlitch)
-        modDelta = cyclesPerSample * 1.333 * juce::MathConstants<double>::twoPi;
+        modDelta = cyclesPerSample * 2.414 * juce::MathConstants<double>::twoPi;
     else
         modDelta = cyclesPerSample * 1.997 * juce::MathConstants<double>::twoPi;
     subDelta = cyclesPerSample * 0.5 * juce::MathConstants<double>::twoPi;
@@ -221,11 +221,11 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     }
     else if (engine == SynthEngine::ovalGlitch)
     {
-        // Oval Glitch: skipping-CD melodic line with a smoother body.
-        adsrParams.attack = 0.0014f;
-        adsrParams.decay = 0.28f;
-        adsrParams.sustain = 0.46f;
-        adsrParams.release = 0.22f;
+        // Oval Glitch: short, punchy laser stab.
+        adsrParams.attack = 0.0003f;
+        adsrParams.decay = 0.050f;
+        adsrParams.sustain = 0.03f;
+        adsrParams.release = 0.035f;
     }
     else if (engine == SynthEngine::fmGlass)
     {
@@ -448,49 +448,51 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
         }
         else if (engine == SynthEngine::ovalGlitch)
         {
-            // Oval Glitch: hard CD-skip stutters + melodic digital tone.
+            // Oval Glitch: pitched laser-noise melody.
             if (--sampleHoldCounter <= 0)
             {
-                sampleHoldPeriod = juce::jlimit(6, 26, 6 + static_cast<int>((noiseSeed >> 9) & 15u));
+                sampleHoldPeriod = juce::jlimit(9, 30, 9 + static_cast<int>((noiseSeed >> 9) & 15u));
                 sampleHoldCounter = sampleHoldPeriod;
                 sampleHoldValue = static_cast<float>((static_cast<int>((noiseSeed >> 12) & 1023u) - 511) * (1.0 / 511.0));
                 ovalSkipPhaseLatch = static_cast<float>(currentAngle);
-                ovalSkipDecimPeriod = juce::jlimit(1, 7, 1 + static_cast<int>((noiseSeed >> 18) & 3u));
+                ovalSkipDecimPeriod = juce::jlimit(2, 8, 2 + static_cast<int>((noiseSeed >> 18) & 3u));
             }
 
-            const float wow = 0.010f * static_cast<float>(std::sin(modAngle * 0.06));
-            const float flutter = 0.0034f * static_cast<float>(std::sin(modAngle * 0.81 + 0.7));
-            const float jitter = sampleHoldValue * 0.0016f;
+            const float wow = 0.008f * static_cast<float>(std::sin(modAngle * 0.05));
+            const float flutter = 0.0028f * static_cast<float>(std::sin(modAngle * 0.73 + 0.7));
+            const float jitter = sampleHoldValue * 0.0012f;
             const float basePhase = static_cast<float>(currentAngle) + wow + flutter + jitter;
 
-            const float skipRate = 11.0f + 6.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.035));
-            const float skipClock = std::fmod(noteAgeSeconds * skipRate + static_cast<float>(std::abs(sampleHoldValue)) * 0.23f, 1.0f);
-            const bool inSkipWindow = (skipClock < 0.52f);
-            const float loopQuantum = 0.045f + 0.040f * static_cast<float>(std::abs(sampleHoldValue));
-            const float loopedPhase = std::floor(basePhase / loopQuantum) * loopQuantum;
-            float phase = inSkipWindow ? (0.18f * loopedPhase + 0.82f * ovalSkipPhaseLatch) : basePhase;
-            phase += 0.03f * static_cast<float>(std::sin(modAngle * 0.31));
+            // Laser-style pitch sweep around note center.
+            const float sweep = 1.0f + 1.18f * std::exp(-noteAgeSeconds * 16.0f);
+            const float wobbleSweep = 0.07f * static_cast<float>(std::sin(modAngle * 0.12));
+            const float laserPhase = basePhase * (sweep + wobbleSweep);
 
-            const float oscA = static_cast<float>(std::sin(phase));
-            const float oscB = static_cast<float>(std::sin(phase * 2.0f + 0.09f * std::sin(modAngle * 0.22)));
-            const float tri = 2.0f * std::abs(2.0f * (phase / juce::MathConstants<float>::twoPi
-                                                    - std::floor(phase / juce::MathConstants<float>::twoPi)) - 1.0f) - 1.0f;
-            const float hiss = white * std::exp(-noteAgeSeconds * 8.0f) * 0.08f;
-            float raw = 0.66f * oscA + 0.18f * oscB + 0.10f * tri + hiss + click * 0.012f;
+            // Keep a subtle "disc skip" window to preserve Oval personality.
+            const float skipRate = 7.0f + 3.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.041));
+            const float skipClock = std::fmod(noteAgeSeconds * skipRate + static_cast<float>(std::abs(sampleHoldValue)) * 0.19f, 1.0f);
+            const bool inSkipWindow = (skipClock < 0.18f);
+            const float phase = inSkipWindow ? (0.25f * laserPhase + 0.75f * ovalSkipPhaseLatch) : laserPhase;
+
+            const float laserMain = static_cast<float>(std::sin(phase));
+            const float laserEdge = static_cast<float>(std::sin(phase * 2.93f + 0.22f * std::sin(modAngle * 0.16)));
+            const float ring = static_cast<float>(std::sin(phase * 4.12f + modAngle * 0.08));
+            const float hiss = white * std::exp(-noteAgeSeconds * 11.0f) * 0.11f;
+            float raw = 0.56f * laserMain + 0.24f * laserEdge + 0.13f * ring + hiss + click * 0.014f;
 
             if (++ovalSkipDecimCounter >= ovalSkipDecimPeriod)
             {
                 ovalSkipDecimCounter = 0;
                 ovalSkipSampleHold = raw;
             }
-            raw = 0.70f * ovalSkipSampleHold + 0.30f * raw;
+            raw = 0.58f * ovalSkipSampleHold + 0.42f * raw;
 
-            const float cutoff = 340.0f + 2100.0f * env + 110.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.03));
+            const float cutoff = 620.0f + 3200.0f * env + 210.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.03));
             const float alpha = std::exp(-juce::MathConstants<float>::twoPi * cutoff / sr);
             lpState = alpha * lpState + (1.0f - alpha) * raw;
             const float hp = raw - lpState;
-            hpState = 0.990f * hpState + 0.010f * hp;
-            voiced = static_cast<float>(std::tanh((0.90f * lpState + 0.10f * hpState) * 1.04f) * 0.72f);
+            hpState = 0.986f * hpState + 0.014f * hp;
+            voiced = static_cast<float>(std::tanh((0.80f * lpState + 0.20f * hpState) * 1.12f) * 0.74f);
         }
         else
         {
@@ -1754,6 +1756,8 @@ void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteL
     {
         midiNote = juce::jlimit(0, 127, quantizeMidiToScale(midiNote));
         midiNote = juce::jlimit(0, 119, midiNote + 12); // global +1 octave for melodic synth voices
+        if (synthEngine == SynthEngine::ovalGlitch)
+            midiNote = juce::jlimit(0, 119, midiNote + 12); // Oval Glitch gets an additional +1 octave
     }
 
     delaySeconds = juce::jmax(0.0f, delaySeconds);
@@ -1945,7 +1949,9 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
 
         const float secondsPerBeat = 60.0f / static_cast<float>(juce::jmax(1.0, bpm));
         const float beatsUntilFinalBeatStart = juce::jmax(0.0f, static_cast<float>(beatsPerBar - 1) - beatInBar);
-        const float gateUntilBeat4Seconds = juce::jmax(0.01f, beatsUntilFinalBeatStart * secondsPerBeat);
+        const float baseGateSeconds = juce::jmax(0.01f, beatsUntilFinalBeatStart * secondsPerBeat);
+        const float chordLengthScale = (synthEngine == SynthEngine::ovalGlitch) ? 0.25f : 1.0f;
+        const float gateUntilBeat4Seconds = juce::jmax(0.01f, baseGateSeconds * chordLengthScale);
         const auto latchGuard = juce::ScopedValueSetter<bool>(chordLatchMode, true);
 
         for (size_t i = 0; i < chosen.size(); ++i)
