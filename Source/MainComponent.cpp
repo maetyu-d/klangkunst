@@ -4,16 +4,8 @@
 
 namespace
 {
-constexpr float pi = 3.14159265358979323846f;
 constexpr std::array<int, 9> arrangementSections { 0, 1, 2, 3, 1, 2, 3, 4, 3 }; // IN,V,PRE,CH,V,PRE,CH,M8,CH
 constexpr std::array<int, 5> arrangementBarsPerSection { 2, 4, 2, 4, 2 }; // IN,V,PRE,CH,M8
-
-float wrapPhase(float p)
-{
-    while (p > juce::MathConstants<float>::twoPi)
-        p -= juce::MathConstants<float>::twoPi;
-    return p;
-}
 
 juce::String toolToString(MainComponent::ToolType t)
 {
@@ -2680,6 +2672,11 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
 
     repaint();
     return true;
+}
+
+bool MainComponent::keyPressed(const juce::KeyPress& key)
+{
+    return keyPressed(key, nullptr);
 }
 
 bool MainComponent::keyPressed(const juce::KeyPress& key, juce::Component*)
