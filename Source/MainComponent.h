@@ -32,7 +32,7 @@ public:
     enum class ToolType { none, redirect, speed, ratchet, key, scale, section };
     enum class ScaleType { chromatic, major, minor, dorian, pentatonic };
     enum class PlayMode { melodic, chord, arpeggio };
-    enum class SynthEngine { digitalV4, fmGlass, velvetNoise };
+    enum class SynthEngine { digitalV4, fmGlass, velvetNoise, chipPulse, ovalGlitch };
     enum class PerformanceMode { a, b };
 private:
 
@@ -133,6 +133,11 @@ private:
         float noiseLP = 0.0f;
         float noiseHP = 0.0f;
         float lastNoise = 0.0f;
+        int chipSfxType = 0;
+        float ovalSkipPhaseLatch = 0.0f;
+        float ovalSkipSampleHold = 0.0f;
+        int ovalSkipDecimCounter = 0;
+        int ovalSkipDecimPeriod = 1;
     };
 
     class WaveSound final : public juce::SynthesiserSound
@@ -297,6 +302,8 @@ private:
     ScaleType scale = ScaleType::minor;
     PlayMode playMode = PlayMode::melodic;
     SynthEngine synthEngine = SynthEngine::digitalV4;
+    int chipSfxCycleCounter = 0;
+    int chipSfxTypeOverride = -1;
 
     double bpm = 118.0;
     double beatPhase = 0.0;

@@ -53,6 +53,8 @@ juce::String synthToString(MainComponent::SynthEngine s)
         case MainComponent::SynthEngine::digitalV4: return "Nova Drift";
         case MainComponent::SynthEngine::fmGlass: return "Prism FM";
         case MainComponent::SynthEngine::velvetNoise: return "Mallet Bloom";
+        case MainComponent::SynthEngine::chipPulse: return "Arcade Pulse";
+        case MainComponent::SynthEngine::ovalGlitch: return "Oval Glitch";
     }
     return "Nova Drift";
 }
@@ -72,7 +74,7 @@ MainComponent::PlayMode nextPlayMode(MainComponent::PlayMode p)
 MainComponent::SynthEngine nextSynth(MainComponent::SynthEngine s)
 {
     const int v = static_cast<int>(s);
-    return static_cast<MainComponent::SynthEngine>((v + 1) % 3);
+    return static_cast<MainComponent::SynthEngine>((v + 1) % 5);
 }
 
 juce::File worldSaveFile()
@@ -126,9 +128,13 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     const auto cyclesPerSample = cyclesPerSecond / currentSampleRate;
     angleDelta = cyclesPerSample * juce::MathConstants<double>::twoPi;
     if (engine == SynthEngine::fmGlass)
-        modDelta = cyclesPerSample * 3.141 * juce::MathConstants<double>::twoPi;
+        modDelta = cyclesPerSample * 2.0 * juce::MathConstants<double>::twoPi;
     else if (engine == SynthEngine::digitalV4)
         modDelta = cyclesPerSample * 0.613 * juce::MathConstants<double>::twoPi;
+    else if (engine == SynthEngine::chipPulse)
+        modDelta = cyclesPerSample * 4.0 * juce::MathConstants<double>::twoPi;
+    else if (engine == SynthEngine::ovalGlitch)
+        modDelta = cyclesPerSample * 1.333 * juce::MathConstants<double>::twoPi;
     else
         modDelta = cyclesPerSample * 1.997 * juce::MathConstants<double>::twoPi;
     subDelta = cyclesPerSample * 0.5 * juce::MathConstants<double>::twoPi;
@@ -150,7 +156,7 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     modAngle = 0.0;
     subAngle = 0.0;
     noteAgeSeconds = 0.0f;
-    noiseSeed = static_cast<uint32_t>(0x9E3779B9u ^ static_cast<uint32_t>(midiNoteNumber * 2654435761u));
+    noiseSeed = static_cast<uint32_t>(0x9E3779B9u ^ (static_cast<uint32_t>(midiNoteNumber) * 2654435761u));
     sampleHoldValue = 0.0f;
     sampleHoldCounter = 0;
     sampleHoldPeriod = juce::jlimit(1, 6, 1 + (midiNoteNumber % 6));
@@ -159,6 +165,19 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     noiseLP = 0.0f;
     noiseHP = 0.0f;
     lastNoise = 0.0f;
+    chipSfxType = 0;
+    ovalSkipPhaseLatch = 0.0f;
+    ovalSkipSampleHold = 0.0f;
+    ovalSkipDecimCounter = 0;
+    ovalSkipDecimPeriod = 1;
+
+    if (! percussionMode && engine == SynthEngine::chipPulse)
+    {
+        const float encoded = juce::jlimit(0.0f, 0.999f, velocity);
+        chipSfxType = juce::jlimit(0, 3, static_cast<int>(encoded * 4.0f));
+        const float decodedLevel = (encoded - 0.25f * static_cast<float>(chipSfxType)) * 4.0f;
+        level = juce::jlimit(0.0f, 1.0f, decodedLevel);
+    }
 
     if (percussionMode)
     {
@@ -192,13 +211,36 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         adsrParams.sustain = 0.0f;
         adsrParams.release = 0.025f;
     }
+    else if (engine == SynthEngine::chipPulse)
+    {
+        // NES-like pulse SFX: snappy onset, short body, tiny tail.
+        adsrParams.attack = 0.0001f;
+        adsrParams.decay = 0.075f;
+        adsrParams.sustain = 0.10f;
+        adsrParams.release = 0.045f;
+    }
+    else if (engine == SynthEngine::ovalGlitch)
+    {
+        // Oval Glitch: skipping-CD melodic line with a smoother body.
+        adsrParams.attack = 0.0014f;
+        adsrParams.decay = 0.28f;
+        adsrParams.sustain = 0.46f;
+        adsrParams.release = 0.22f;
+    }
+    else if (engine == SynthEngine::fmGlass)
+    {
+        // Prism FM: clearer lyrical bloom while retaining a glass edge.
+        adsrParams.attack = 0.0025f;
+        adsrParams.decay = 0.32f;
+        adsrParams.sustain = 0.24f;
+        adsrParams.release = 0.26f;
+    }
     else
     {
-        // Soft bell-pluck with shorter but musical tail.
-        adsrParams.attack = 0.0018f;
-        adsrParams.decay = 0.22f;
-        adsrParams.sustain = 0.0f;
-        adsrParams.release = 0.20f;
+        adsrParams.attack = 0.003f;
+        adsrParams.decay = 0.18f;
+        adsrParams.sustain = 0.20f;
+        adsrParams.release = 0.10f;
     }
     adsr.setParameters(adsrParams);
     adsr.noteOn();
@@ -238,10 +280,10 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
                 {
                     // 909-like kick: pitch-dropped sine body + short click.
                     const float pitchDrop = 1.0f + 4.4f * std::exp(-noteAgeSeconds * 48.0f);
-                    const float body = std::sin(currentAngle * pitchDrop);
+                    const float body = static_cast<float>(std::sin(currentAngle * pitchDrop));
                     const float bodyEnv = std::exp(-noteAgeSeconds * 11.5f);
                     const float clickEnv = std::exp(-noteAgeSeconds * 165.0f);
-                    const float clickTone = std::sin(currentAngle * 10.0);
+                    const float clickTone = static_cast<float>(std::sin(currentAngle * 10.0));
                     voicedPerc = 0.95f * body * bodyEnv + 0.19f * clickTone * clickEnv + 0.08f * white * clickEnv;
                     break;
                 }
@@ -252,8 +294,8 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
                     noiseHP = white - noiseLP;
                     const float snapEnv = std::exp(-noteAgeSeconds * 47.0f);
                     const float toneEnv = std::exp(-noteAgeSeconds * 20.0f);
-                    const float tone1 = std::sin(currentAngle * 1.86);
-                    const float tone2 = std::sin(currentAngle * 2.71);
+                    const float tone1 = static_cast<float>(std::sin(currentAngle * 1.86));
+                    const float tone2 = static_cast<float>(std::sin(currentAngle * 2.71));
                     const float preSnap = (white - lastNoise);
                     voicedPerc = 0.42f * tone1 * toneEnv
                                + 0.18f * tone2 * toneEnv
@@ -320,22 +362,135 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
             const auto hp = raw - lpState;
             hpState = 0.996f * hpState + 0.004f * hp;
 
-            voiced = std::tanh((0.97f * lpState + 0.005f * hpState + 0.06f * subWarm) * 0.90f) * 0.66f;
+            voiced = static_cast<float>(std::tanh((0.97f * lpState + 0.005f * hpState + 0.06f * subWarm) * 0.90f) * 0.66f);
         }
         else if (engine == SynthEngine::fmGlass)
         {
-            // Prism FM: harmonic integer-ratio FM with a glassy but sweet top.
-            const float idx = 1.35f * std::exp(-noteAgeSeconds * 7.4f) + 0.08f;
-            const auto carrier = std::sin(currentAngle + idx * std::sin(modAngle));
-            const auto side2 = std::sin(currentAngle * 2.0 + idx * 0.30f * std::sin(modAngle * 0.5));
-            const auto side3 = std::sin(currentAngle * 3.0 + idx * 0.16f * std::sin(modAngle * 0.31));
-            const auto air = std::sin(currentAngle * 4.0 + modAngle * 0.09);
-            const auto raw = static_cast<float>(0.75 * carrier + 0.16 * side2 + 0.06 * side3 + 0.03 * air + click * 0.02f);
+            // Prism FM: consonant dual-operator FM with gentle glass shimmer.
+            const float idxMain = 0.72f * std::exp(-noteAgeSeconds * 3.6f) + 0.13f;
+            const float idxAir = 0.21f * std::exp(-noteAgeSeconds * 6.8f);
+            const auto slowDrift = 0.025f * std::sin(modAngle * 0.11);
+            const auto mod1 = std::sin(modAngle + slowDrift);
+            const auto mod2 = std::sin(modAngle * 0.75 + 0.6 * std::sin(modAngle * 0.09));
 
+            const auto carrier = std::sin(currentAngle + idxMain * mod1 + idxAir * mod2);
+            const auto harmonic2 = std::sin(currentAngle * 2.0 + idxMain * 0.22f * mod1);
+            const auto harmonic3 = std::sin(currentAngle * 3.0 + idxMain * 0.10f * mod2);
+            const auto glass = std::sin(currentAngle * 4.0 + modAngle * 0.07);
+            const auto raw = static_cast<float>(0.81 * carrier
+                                              + 0.11 * harmonic2
+                                              + 0.05 * harmonic3
+                                              + 0.03 * glass
+                                              + click * 0.012f);
+
+            const auto cutoff = 520.0f + 2350.0f * env + 240.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.02));
+            const auto alpha = std::exp(-juce::MathConstants<float>::twoPi * cutoff / sr);
+            lpState = alpha * lpState + (1.0f - alpha) * raw;
+            const auto hp = raw - lpState;
+            hpState = 0.993f * hpState + 0.007f * hp;
+            voiced = static_cast<float>(std::tanh((0.95f * lpState + 0.04f * hpState) * 0.96f) * 0.67f);
+        }
+        else if (engine == SynthEngine::chipPulse)
+        {
+            // Arcade Pulse: cycle NES-like SFX variants (coin/jump/laser/blip).
+            const float phaseA = static_cast<float>(currentAngle / juce::MathConstants<double>::twoPi);
+            const float phaseB = static_cast<float>((currentAngle * 2.0) / juce::MathConstants<double>::twoPi);
+            const float pA = phaseA - std::floor(phaseA);
+            const float pB = phaseB - std::floor(phaseB);
+            static constexpr float dutySet[4] = { 0.125f, 0.25f, 0.5f, 0.75f };
+
+            float raw = 0.0f;
+            switch (chipSfxType)
+            {
+                case 0: // coin: bright upward ping
+                {
+                    const float chirpUp = 1.0f + 0.55f * (1.0f - std::exp(-noteAgeSeconds * 120.0f));
+                    const float coinPhase = static_cast<float>((currentAngle * chirpUp) / juce::MathConstants<double>::twoPi);
+                    const float pc = coinPhase - std::floor(coinPhase);
+                    const float pulse = (pc < 0.125f) ? 1.0f : -1.0f;
+                    raw = 0.88f * pulse + 0.12f * click;
+                    break;
+                }
+                case 1: // jump: down-chirp pulse
+                {
+                    const float chirpDown = 1.0f + 0.42f * std::exp(-noteAgeSeconds * 20.0f);
+                    const float jumpPhase = static_cast<float>((currentAngle * chirpDown) / juce::MathConstants<double>::twoPi);
+                    const float pj = jumpPhase - std::floor(jumpPhase);
+                    const float pulse = (pj < 0.25f) ? 1.0f : -1.0f;
+                    const float body = 2.0f * std::abs(2.0f * pj - 1.0f) - 1.0f;
+                    raw = 0.72f * pulse + 0.20f * body + 0.08f * click;
+                    break;
+                }
+                case 2: // laser: aggressive sweep + bit edge
+                {
+                    const float sweep = 1.0f + 1.05f * std::exp(-noteAgeSeconds * 16.0f);
+                    const float laserPhase = static_cast<float>((currentAngle * sweep) / juce::MathConstants<double>::twoPi);
+                    const float pl = laserPhase - std::floor(laserPhase);
+                    const float pulse = (pl < dutySet[static_cast<size_t>((noiseSeed >> 7) & 3u)]) ? 1.0f : -1.0f;
+                    const float ring = static_cast<float>(std::sin(modAngle * 0.42));
+                    raw = 0.76f * pulse + 0.14f * ring + 0.14f * white * std::exp(-noteAgeSeconds * 45.0f);
+                    break;
+                }
+                case 3:
+                default: // blip: fast dual pulse and short click
+                {
+                    const float pulseA = (pA < 0.5f) ? 1.0f : -1.0f;
+                    const float pulseB = (pB < 0.125f) ? 1.0f : -1.0f;
+                    raw = 0.70f * pulseA + 0.22f * pulseB + 0.10f * click + 0.07f * white * std::exp(-noteAgeSeconds * 95.0f);
+                    break;
+                }
+            }
+
+            const float stepped = std::round(raw * 7.0f) * (1.0f / 7.0f);
+            hpState = 0.975f * hpState + 0.025f * (stepped - lpState);
+            lpState = stepped;
+            voiced = static_cast<float>(std::tanh((0.84f * stepped + 0.18f * hpState) * 0.96f) * 0.72f);
+        }
+        else if (engine == SynthEngine::ovalGlitch)
+        {
+            // Oval Glitch: hard CD-skip stutters + melodic digital tone.
+            if (--sampleHoldCounter <= 0)
+            {
+                sampleHoldPeriod = juce::jlimit(6, 26, 6 + static_cast<int>((noiseSeed >> 9) & 15u));
+                sampleHoldCounter = sampleHoldPeriod;
+                sampleHoldValue = static_cast<float>((static_cast<int>((noiseSeed >> 12) & 1023u) - 511) * (1.0 / 511.0));
+                ovalSkipPhaseLatch = static_cast<float>(currentAngle);
+                ovalSkipDecimPeriod = juce::jlimit(1, 7, 1 + static_cast<int>((noiseSeed >> 18) & 3u));
+            }
+
+            const float wow = 0.010f * static_cast<float>(std::sin(modAngle * 0.06));
+            const float flutter = 0.0034f * static_cast<float>(std::sin(modAngle * 0.81 + 0.7));
+            const float jitter = sampleHoldValue * 0.0016f;
+            const float basePhase = static_cast<float>(currentAngle) + wow + flutter + jitter;
+
+            const float skipRate = 11.0f + 6.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.035));
+            const float skipClock = std::fmod(noteAgeSeconds * skipRate + static_cast<float>(std::abs(sampleHoldValue)) * 0.23f, 1.0f);
+            const bool inSkipWindow = (skipClock < 0.52f);
+            const float loopQuantum = 0.045f + 0.040f * static_cast<float>(std::abs(sampleHoldValue));
+            const float loopedPhase = std::floor(basePhase / loopQuantum) * loopQuantum;
+            float phase = inSkipWindow ? (0.18f * loopedPhase + 0.82f * ovalSkipPhaseLatch) : basePhase;
+            phase += 0.03f * static_cast<float>(std::sin(modAngle * 0.31));
+
+            const float oscA = static_cast<float>(std::sin(phase));
+            const float oscB = static_cast<float>(std::sin(phase * 2.0f + 0.09f * std::sin(modAngle * 0.22)));
+            const float tri = 2.0f * std::abs(2.0f * (phase / juce::MathConstants<float>::twoPi
+                                                    - std::floor(phase / juce::MathConstants<float>::twoPi)) - 1.0f) - 1.0f;
+            const float hiss = white * std::exp(-noteAgeSeconds * 8.0f) * 0.08f;
+            float raw = 0.66f * oscA + 0.18f * oscB + 0.10f * tri + hiss + click * 0.012f;
+
+            if (++ovalSkipDecimCounter >= ovalSkipDecimPeriod)
+            {
+                ovalSkipDecimCounter = 0;
+                ovalSkipSampleHold = raw;
+            }
+            raw = 0.70f * ovalSkipSampleHold + 0.30f * raw;
+
+            const float cutoff = 340.0f + 2100.0f * env + 110.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.03));
+            const float alpha = std::exp(-juce::MathConstants<float>::twoPi * cutoff / sr);
+            lpState = alpha * lpState + (1.0f - alpha) * raw;
             const float hp = raw - lpState;
-            lpState += 0.11f * (raw - lpState);
-            hpState += 0.02f * (hp - hpState);
-            voiced = std::tanh((0.94f * raw + 0.05f * hpState) * 0.92f) * 0.66f;
+            hpState = 0.990f * hpState + 0.010f * hp;
+            voiced = static_cast<float>(std::tanh((0.90f * lpState + 0.10f * hpState) * 1.04f) * 0.72f);
         }
         else
         {
@@ -772,7 +927,7 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
         g.fillEllipse(s.p.x - s.size, s.p.y - s.size, s.size * 2.0f, s.size * 2.0f);
     }
 
-    g.setFont(juce::Font("Avenir Next", 96.0f, juce::Font::bold));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 96.0f, juce::Font::bold)));
     g.setColour(juce::Colour(0xffff2c95).withAlpha(0.38f + globalJuice * 0.3f));
     g.drawText("KlangKunst", getLocalBounds().translated(static_cast<int>(-3.0f - wobble * 0.3f), static_cast<int>(2.0f + wobble * 0.1f)), juce::Justification::centredTop, true);
     g.setColour(juce::Colour(0xff16e9ff).withAlpha(0.38f + globalJuice * 0.3f));
@@ -782,11 +937,11 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.95f));
     g.drawText("KlangKunst", getLocalBounds().translated(0, 0), juce::Justification::centredTop, true);
 
-    g.setFont(juce::Font("Avenir Next", 26.0f, juce::Font::plain));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 26.0f, juce::Font::plain)));
     g.setColour(juce::Colours::white.withAlpha(0.9f));
     g.drawText("Building Music / Playing Architecture", 0, 110, getWidth(), 40, juce::Justification::centred);
 
-    g.setFont(juce::Font("Avenir Next", 22.0f, juce::Font::bold));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 22.0f, juce::Font::bold)));
     g.drawText("matd.space", 24, 16, 240, 30, juce::Justification::topLeft);
 
     const auto menu = getTitleMenu();
@@ -799,7 +954,7 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.85f));
     g.drawRoundedRectangle(panel.toFloat(), 8.0f, 2.0f);
 
-    g.setFont(juce::Font("Avenir Next", 28.0f, juce::Font::bold));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 28.0f, juce::Font::bold)));
     for (size_t i = 0; i < menu.size(); ++i)
     {
         juce::String text;
@@ -826,7 +981,7 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
         g.drawText(text, row, juce::Justification::centred);
     }
 
-    g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::plain));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 16.0f, juce::Font::plain)));
     g.setColour(juce::Colours::white.withAlpha(0.7f));
     g.drawText("Use Up/Down + Enter", panel.withY(panel.getBottom() - 34), juce::Justification::centred);
 
@@ -838,7 +993,7 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
         g.setColour(juce::Colour(0xff2df8ff).withAlpha(0.9f));
         g.drawRoundedRectangle(chooser, 14.0f, 2.0f);
 
-        g.setFont(juce::Font("Avenir Next", 26.0f, juce::Font::bold));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 26.0f, juce::Font::bold)));
         g.setColour(juce::Colours::white.withAlpha(0.96f));
         g.drawText("Choose Time Signature / World Size", chooser.removeFromTop(58.0f).toNearestInt(), juce::Justification::centred);
 
@@ -852,11 +1007,11 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
             g.fillRoundedRectangle(row, 10.0f);
             g.setColour(c.withAlpha(sel ? 0.95f : 0.70f));
             g.drawRoundedRectangle(row, 10.0f, sel ? 2.2f : 1.2f);
-            g.setFont(juce::Font("Avenir Next", sel ? 24.0f : 22.0f, sel ? juce::Font::bold : juce::Font::plain));
+            g.setFont(juce::Font(juce::FontOptions("Avenir Next", sel ? 24.0f : 22.0f, sel ? juce::Font::bold : juce::Font::plain)));
             g.drawText(labels[i], row.toNearestInt(), juce::Justification::centred);
         }
 
-        g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::plain));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 16.0f, juce::Font::plain)));
         g.setColour(juce::Colours::white.withAlpha(0.74f));
         g.drawText("Up/Down to choose, Enter to confirm, Esc to cancel",
                    chooser.withTrimmedTop(8.0f).toNearestInt(),
@@ -1169,7 +1324,7 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
             g.drawLine(m00.x, m11.y, m11.x, m00.y, 1.3f);
         }
 
-        g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::bold));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 16.0f, juce::Font::bold)));
         g.drawText(label + " z" + juce::String(p.z), juce::Rectangle<int>(static_cast<int>(markerCenter.x) - 36, static_cast<int>(markerCenter.y) - 54, 84, 20), juce::Justification::centred);
     };
 
@@ -1185,7 +1340,7 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
     }
 
     g.setColour(juce::Colours::white.withAlpha(0.86f));
-    g.setFont(juce::Font("Avenir Next", 17.0f, juce::Font::plain));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 17.0f, juce::Font::plain)));
     g.drawText("BUILD MODE | P1 WASD Q/E R/F(place/remove @ z) | P2 Arrows [ ] / .(place/remove @ z) | View Z/X | K Key | G Scale | Y Quantize Blocks | H Beat | V Miverb | B Mix | Enter Performance",
                14, 10, getWidth() - 28, 24, juce::Justification::left);
 
@@ -1207,7 +1362,7 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
         g.drawRoundedRectangle(panel, 14.0f, 2.0f);
 
         g.setColour(juce::Colours::white.withAlpha(0.95f));
-        g.setFont(juce::Font("Avenir Next", 28.0f, juce::Font::bold));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 28.0f, juce::Font::bold)));
         g.drawText("Choose Performance Mode", panel.removeFromTop(58.0f).toNearestInt(), juce::Justification::centred);
 
         const juce::String labels[2] = { "Mode A  (Autonomous Snakes)", "Mode B  (Player-Steered Snakes)" };
@@ -1219,11 +1374,11 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
             g.fillRoundedRectangle(row, 10.0f);
             g.setColour((sel ? juce::Colour(0xff16e9ff) : juce::Colours::white).withAlpha(sel ? 0.95f : 0.65f));
             g.drawRoundedRectangle(row, 10.0f, sel ? 2.1f : 1.0f);
-            g.setFont(juce::Font("Avenir Next", sel ? 22.0f : 20.0f, sel ? juce::Font::bold : juce::Font::plain));
+            g.setFont(juce::Font(juce::FontOptions("Avenir Next", sel ? 22.0f : 20.0f, sel ? juce::Font::bold : juce::Font::plain)));
             g.drawText(labels[i], row.toNearestInt(), juce::Justification::centred);
         }
 
-        g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::plain));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 16.0f, juce::Font::plain)));
         g.setColour(juce::Colours::white.withAlpha(0.72f));
         g.drawText("Up/Down to choose, Enter to confirm, Esc to cancel",
                    panel.withTrimmedTop(8.0f).toNearestInt(),
@@ -1363,7 +1518,7 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
     {
         for (int x = 0; x < worldSize; ++x)
         {
-            const Tool& t = tools[x][y];
+            const Tool& t = tools[static_cast<size_t>(x)][static_cast<size_t>(y)];
             if (t.type == ToolType::none)
                 continue;
 
@@ -1388,7 +1543,7 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
                 if (t.type == ToolType::key) label = "K" + juce::String(t.state);
                 if (t.type == ToolType::scale) label = "S" + juce::String(t.state);
                 if (t.type == ToolType::section) label = "SEC" + juce::String(t.state);
-                g.setFont(juce::Font("Avenir Next", 11.0f, juce::Font::bold));
+                g.setFont(juce::Font(juce::FontOptions("Avenir Next", 11.0f, juce::Font::bold)));
                 g.drawText(label, r.toNearestInt(), juce::Justification::centred);
             }
         }
@@ -1400,12 +1555,12 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
         {
             for (int x = 0; x < worldSize; ++x)
             {
-                if (! randomRedirectActive[x][y])
+                if (! randomRedirectActive[static_cast<size_t>(x)][static_cast<size_t>(y)])
                     continue;
 
                 juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
                 const juce::Point<float> c = r.getCentre();
-                const float a = static_cast<float>(randomRedirectRotation[x][y] % 4) * juce::MathConstants<float>::halfPi;
+                const float a = static_cast<float>(randomRedirectRotation[static_cast<size_t>(x)][static_cast<size_t>(y)] % 4) * juce::MathConstants<float>::halfPi;
                 g.setColour(juce::Colour(0xff16e9ff).withAlpha(0.75f));
                 g.drawEllipse(r.reduced(cell * 0.18f), 2.0f);
                 g.drawArrow(juce::Line<float>(c, c + juce::Point<float>(std::cos(a), std::sin(a)) * (cell * 0.24f)), 2.0f, 7.0f, 7.0f);
@@ -1416,7 +1571,7 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
     if (barPulse)
     {
         g.setColour(juce::Colours::white.withAlpha(0.18f));
-        const float rr = 80.0f + (beatPhase * 40.0f);
+        const float rr = 80.0f + static_cast<float>(beatPhase * 40.0);
         g.drawEllipse(bounds.getCentreX() - rr, bounds.getCentreY() - rr, rr * 2.0f, rr * 2.0f, 2.0f);
     }
     g.setColour(juce::Colour(0xff00fff2).withAlpha(beatFlash * 0.22f));
@@ -1424,7 +1579,7 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
     g.drawEllipse(bounds.getCentreX() - radarR, bounds.getCentreY() - radarR, radarR * 2.0f, radarR * 2.0f, 3.0f);
 
     g.setColour(juce::Colours::white.withAlpha(0.88f));
-    g.setFont(juce::Font("Avenir Next", 17.0f, juce::Font::plain));
+    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 17.0f, juce::Font::plain)));
     const juce::String modeLabel = (performanceMode == PerformanceMode::a ? "PERFORMANCE MODE A" : "PERFORMANCE MODE B");
     const juce::String steerHint = (performanceMode == PerformanceMode::b
                                         ? " | Steer: P1 WASD P2 Arrows"
@@ -1446,7 +1601,7 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
     if (countdownBeats > 0)
     {
         g.setColour(juce::Colours::white.withAlpha(0.96f));
-        g.setFont(juce::Font("Avenir Next", 78.0f, juce::Font::bold));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 78.0f, juce::Font::bold)));
         g.drawText(juce::String(countdownBeats), getLocalBounds(), juce::Justification::centred);
     }
 }
@@ -1603,6 +1758,14 @@ void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteL
 
     delaySeconds = juce::jmax(0.0f, delaySeconds);
     noteLengthSeconds = juce::jmax(0.02f, noteLengthSeconds);
+    velocity = juce::jlimit(0.0f, 1.0f, velocity);
+
+    if (synthEngine == SynthEngine::chipPulse && midiNote < 120)
+    {
+        const int sfxType = (chipSfxTypeOverride >= 0) ? chipSfxTypeOverride
+                                                       : ((chipSfxCycleCounter++) % 4);
+        velocity = juce::jlimit(0.0f, 0.999f, 0.001f + 0.25f * static_cast<float>(sfxType) + velocity * 0.249f);
+    }
 
     if (delaySeconds <= 0.0001f)
     {
@@ -1671,9 +1834,9 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
     if (x < 0 || y < 0 || x >= worldSize || y >= worldSize)
         return -1;
 
-    if (tools[x][y].type == ToolType::section)
+    if (tools[static_cast<size_t>(x)][static_cast<size_t>(y)].type == ToolType::section)
     {
-        const int taggedSection = juce::jlimit(0, 4, tools[x][y].state);
+        const int taggedSection = juce::jlimit(0, 4, tools[static_cast<size_t>(x)][static_cast<size_t>(y)].state);
         const int activeSection = (gateSection >= 0 ? gateSection : activeArrangementSection());
         if (arrangementEnabled && taggedSection != activeSection)
             return -1;
@@ -1691,9 +1854,12 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
     if (stack.empty())
         return -1;
 
+    const int blockSfxType = (synthEngine == SynthEngine::chipPulse) ? ((chipSfxCycleCounter++) % 4) : -1;
+    const auto chipSfxScope = juce::ScopedValueSetter<int>(chipSfxTypeOverride, blockSfxType);
+
     int section = activeArrangementSection();
-    if (tools[x][y].type == ToolType::section)
-        section = juce::jlimit(0, 4, tools[x][y].state);
+    if (tools[static_cast<size_t>(x)][static_cast<size_t>(y)].type == ToolType::section)
+        section = juce::jlimit(0, 4, tools[static_cast<size_t>(x)][static_cast<size_t>(y)].state);
 
     const int beatsPerBar = beatsPerBarForWorldSize(worldSize);
     const float beatInBar = static_cast<float>(beatCounter % beatsPerBar) + static_cast<float>(beatPhase);
@@ -1908,13 +2074,14 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
 
 void MainComponent::applyToolToSnake(Snake& snake)
 {
-    if (performanceMode == PerformanceMode::b && randomRedirectActive[snake.cell.x][snake.cell.y])
+    if (performanceMode == PerformanceMode::b &&
+        randomRedirectActive[static_cast<size_t>(snake.cell.x)][static_cast<size_t>(snake.cell.y)])
     {
         static constexpr juce::Point<int> dirs[4] = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } };
-        snake.dir = dirs[(randomRedirectRotation[snake.cell.x][snake.cell.y] % 4 + 4) % 4];
+        snake.dir = dirs[(randomRedirectRotation[static_cast<size_t>(snake.cell.x)][static_cast<size_t>(snake.cell.y)] % 4 + 4) % 4];
     }
 
-    Tool& t = tools[snake.cell.x][snake.cell.y];
+    Tool& t = tools[static_cast<size_t>(snake.cell.x)][static_cast<size_t>(snake.cell.y)];
 
     switch (t.type)
     {
@@ -1972,10 +2139,10 @@ void MainComponent::advancePerformanceStep()
     {
         const auto clearRandomCell = [&](const juce::Point<int>& c)
         {
-            if (! randomRedirectActive[c.x][c.y])
+            if (! randomRedirectActive[static_cast<size_t>(c.x)][static_cast<size_t>(c.y)])
                 return;
-            randomRedirectActive[c.x][c.y] = false;
-            randomRedirectRotation[c.x][c.y] = 0;
+            randomRedirectActive[static_cast<size_t>(c.x)][static_cast<size_t>(c.y)] = false;
+            randomRedirectRotation[static_cast<size_t>(c.x)][static_cast<size_t>(c.y)] = 0;
         };
 
         if ((performanceStepCounter % 2) == 0)
@@ -1986,14 +2153,14 @@ void MainComponent::advancePerformanceStep()
                 {
                     const int x = rng.nextInt(worldSize);
                     const int y = rng.nextInt(worldSize);
-                    if (randomRedirectActive[x][y])
+                    if (randomRedirectActive[static_cast<size_t>(x)][static_cast<size_t>(y)])
                         continue;
-                    if (tools[x][y].type != ToolType::none)
+                    if (tools[static_cast<size_t>(x)][static_cast<size_t>(y)].type != ToolType::none)
                         continue;
                     if ((x == snakeA.cell.x && y == snakeA.cell.y) || (x == snakeB.cell.x && y == snakeB.cell.y))
                         continue;
-                    randomRedirectActive[x][y] = true;
-                    randomRedirectRotation[x][y] = rng.nextInt(4);
+                    randomRedirectActive[static_cast<size_t>(x)][static_cast<size_t>(y)] = true;
+                    randomRedirectRotation[static_cast<size_t>(x)][static_cast<size_t>(y)] = rng.nextInt(4);
                     randomRedirectCells.push_back({ x, y });
                     performanceCacheDirty = true;
                     break;
@@ -2552,7 +2719,7 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
     else if (c == 'r' || c == 'R' || c == '/')
     {
         PlayerCursor& actor = (c == '/' ? p2 : p1);
-        Tool& t = tools[actor.x][actor.y];
+        Tool& t = tools[static_cast<size_t>(actor.x)][static_cast<size_t>(actor.y)];
         const ToolType selected = static_cast<ToolType>(selectedToolIndex);
         if (t.type != selected)
             t = { selected, 0, 0 };
@@ -2575,7 +2742,7 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
     else if (c == 'f' || c == 'F' || c == '.')
     {
         PlayerCursor& actor = (c == '.' ? p2 : p1);
-        Tool& t = tools[actor.x][actor.y];
+        Tool& t = tools[static_cast<size_t>(actor.x)][static_cast<size_t>(actor.y)];
         if (t.type != ToolType::none)
             t.rotation = (t.rotation + 1) % 4;
         performanceCacheDirty = true;
@@ -2748,11 +2915,11 @@ void MainComponent::writeWorldToFile(const juce::File& targetFile)
         juce::Array<juce::var> trow;
         for (int x = 0; x < worldSize; ++x)
         {
-            colRow.add(static_cast<juce::int64>(columns[x][y]));
+            colRow.add(static_cast<juce::int64>(columns[static_cast<size_t>(x)][static_cast<size_t>(y)]));
             juce::DynamicObject::Ptr t = new juce::DynamicObject();
-            t->setProperty("type", static_cast<int>(tools[x][y].type));
-            t->setProperty("rotation", tools[x][y].rotation);
-            t->setProperty("state", tools[x][y].state);
+            t->setProperty("type", static_cast<int>(tools[static_cast<size_t>(x)][static_cast<size_t>(y)].type));
+            t->setProperty("rotation", tools[static_cast<size_t>(x)][static_cast<size_t>(y)].rotation);
+            t->setProperty("state", tools[static_cast<size_t>(x)][static_cast<size_t>(y)].state);
             trow.add(juce::var(t.get()));
         }
         columnRows.add(colRow);
@@ -2805,7 +2972,7 @@ void MainComponent::loadWorldFromFile()
                 continue;
             const auto* arr = row.getArray();
             for (int x = 0; x < juce::jmin(worldSize, arr->size()); ++x)
-                columns[x][y] = static_cast<uint32_t>(static_cast<juce::int64>(arr->getReference(x)));
+                columns[static_cast<size_t>(x)][static_cast<size_t>(y)] = static_cast<uint32_t>(static_cast<juce::int64>(arr->getReference(x)));
         }
     }
     else
@@ -2847,9 +3014,9 @@ void MainComponent::loadWorldFromFile()
                     continue;
                 if (auto* to = tv.getDynamicObject())
                 {
-                    tools[x][y].type = static_cast<ToolType>(juce::jlimit(0, 6, static_cast<int>(to->getProperty("type"))));
-                    tools[x][y].rotation = static_cast<int>(to->getProperty("rotation")) % 4;
-                    tools[x][y].state = static_cast<int>(to->getProperty("state"));
+                    tools[static_cast<size_t>(x)][static_cast<size_t>(y)].type = static_cast<ToolType>(juce::jlimit(0, 6, static_cast<int>(to->getProperty("type"))));
+                    tools[static_cast<size_t>(x)][static_cast<size_t>(y)].rotation = static_cast<int>(to->getProperty("rotation")) % 4;
+                    tools[static_cast<size_t>(x)][static_cast<size_t>(y)].state = static_cast<int>(to->getProperty("state"));
                 }
             }
         }
