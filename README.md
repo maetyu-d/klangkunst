@@ -1,6 +1,6 @@
-# KlangKunst v2 (JUCE)
+# KlangKunst
 
-Part instrument, part toy, part architectural sandbox.
+Part instrument, part sound toy, part architectural sandbox.
 
 ## Build
 
