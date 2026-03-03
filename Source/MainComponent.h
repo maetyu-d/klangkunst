@@ -22,7 +22,7 @@ public:
     void timerCallback() override;
 
 private:
-    static constexpr int worldSize = 16;
+    static constexpr int maxWorldSize = 20;
     static constexpr int maxHeight = 25;
 
 public:
@@ -32,6 +32,7 @@ public:
     enum class ScaleType { chromatic, major, minor, dorian, pentatonic };
     enum class PlayMode { melodic, chord, arpeggio };
     enum class SynthEngine { digitalV4, fmGlass, velvetNoise };
+    enum class PerformanceMode { a, b };
 private:
 
     struct PlayerCursor
@@ -218,12 +219,14 @@ private:
     bool handleBuildKeys(const juce::KeyPress& key);
     bool handlePerformanceKeys(const juce::KeyPress& key);
 
-    void startPerformanceMode();
+    void startPerformanceMode(PerformanceMode targetMode = PerformanceMode::a);
     void enterBuildMode();
 
     void performMenuAction(MenuAction action);
     std::vector<MenuAction> getTitleMenu() const;
     bool isTitleActionEnabled(MenuAction action) const;
+    void beginBlankWorldSizeSelection();
+    void confirmBlankWorldSizeSelection();
 
     juce::Point<float> isoToScreen(int x, int y, int z, float tileW, float tileH, juce::Point<float> origin, int rot) const;
     juce::Point<float> getBuildOrigin(float tileW, float tileH) const;
@@ -263,15 +266,24 @@ private:
     bool hasSession = false;
     bool hasVisitedBuildMode = false;
 
-    std::array<std::array<uint32_t, worldSize>, worldSize> columns {};
-    std::array<std::array<Tool, worldSize>, worldSize> tools;
+    int worldSize = 16;
+    bool selectingBlankWorldSize = false;
+    int blankWorldSignatureIndex = 1; // 0=3/4(12), 1=4/4(16), 2=5/4(20)
+    bool selectingPerformanceMode = false;
+    int pendingPerformanceModeIndex = 0; // 0=A, 1=B
+
+    std::array<std::array<uint32_t, maxWorldSize>, maxWorldSize> columns {};
+    std::array<std::array<Tool, maxWorldSize>, maxWorldSize> tools;
 
     PlayerCursor p1 { 2, 2, 0, juce::Colours::cyan };
-    PlayerCursor p2 { worldSize - 3, worldSize - 3, 0, juce::Colours::orange };
+    PlayerCursor p2 { 13, 13, 0, juce::Colours::orange };
     int viewRotation = 0;
 
     Snake snakeA;
     Snake snakeB;
+    Snake snakeC;
+    Snake snakeD;
+    int modeASnakeCount = 1;
     std::vector<Pulse> pulses;
     std::vector<Spark> sparks;
     bool chordLatchMode = false;
@@ -298,6 +310,12 @@ private:
     double performanceMoveAccumulator = 0.0;
     int performanceStepCounter = 0;
     int countdownBeats = 0;
+    PerformanceMode performanceMode = PerformanceMode::a;
+    int p1Points = 0;
+    int p2Points = 0;
+    std::array<std::array<bool, maxWorldSize>, maxWorldSize> randomRedirectActive {};
+    std::array<std::array<int, maxWorldSize>, maxWorldSize> randomRedirectRotation {};
+    std::vector<juce::Point<int>> randomRedirectCells;
 
     juce::Image titleCache;
     juce::Image buildCache;

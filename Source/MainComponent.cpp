@@ -102,6 +102,20 @@ int arrangementIndexForSection(int section)
     }
     return 1;
 }
+
+int signatureIndexForWorldSize(int size)
+{
+    if (size <= 12) return 0;
+    if (size >= 20) return 2;
+    return 1;
+}
+
+int beatsPerBarForWorldSize(int size)
+{
+    if (size <= 12) return 3; // 3/4
+    if (size >= 20) return 5; // 5/4
+    return 4;                 // 4/4
+}
 } // namespace
 
 bool MainComponent::WaveVoice::canPlaySound(juce::SynthesiserSound* s)
@@ -113,6 +127,9 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
 {
     currentSampleRate = getSampleRate();
     level = velocity;
+    percussionMode = midiNoteNumber >= 120;
+    percussionType = juce::jlimit(0, 3, midiNoteNumber - 120);
+
     const auto cyclesPerSecond = juce::MidiMessage::getMidiNoteInHertz(midiNoteNumber);
     const auto cyclesPerSample = cyclesPerSecond / currentSampleRate;
     angleDelta = cyclesPerSample * juce::MathConstants<double>::twoPi;
@@ -123,6 +140,20 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     else
         modDelta = cyclesPerSample * 1.997 * juce::MathConstants<double>::twoPi;
     subDelta = cyclesPerSample * 0.5 * juce::MathConstants<double>::twoPi;
+    if (percussionMode)
+    {
+        // Decouple drum voices from high MIDI note frequencies to avoid beepy tones.
+        double drumHz = 120.0;
+        if (percussionType == 0) drumHz = 52.0;      // kick body
+        else if (percussionType == 1) drumHz = 182.0; // snare body
+        else if (percussionType == 2) drumHz = 420.0; // hat metal tone
+        else drumHz = 260.0;                          // accent/noise hit
+
+        const double drumCyclesPerSample = drumHz / currentSampleRate;
+        angleDelta = drumCyclesPerSample * juce::MathConstants<double>::twoPi;
+        modDelta = drumCyclesPerSample * 2.1 * juce::MathConstants<double>::twoPi;
+        subDelta = drumCyclesPerSample * 0.5 * juce::MathConstants<double>::twoPi;
+    }
     currentAngle = 0.0;
     modAngle = 0.0;
     subAngle = 0.0;
@@ -133,8 +164,6 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     sampleHoldPeriod = juce::jlimit(1, 6, 1 + (midiNoteNumber % 6));
     lpState = 0.0f;
     hpState = 0.0f;
-    percussionMode = midiNoteNumber >= 120;
-    percussionType = juce::jlimit(0, 3, midiNoteNumber - 120);
     noiseLP = 0.0f;
     noiseHP = 0.0f;
     lastNoise = 0.0f;
@@ -157,11 +186,11 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     }
     else if (engine == SynthEngine::digitalV4)
     {
-        // Warm melodic synth with gentle onset and long tail.
-        adsrParams.attack = 0.010f;
-        adsrParams.decay = 0.36f;
-        adsrParams.sustain = 0.70f;
-        adsrParams.release = 1.05f;
+        // Lyrical pluck/lead with soft bloom.
+        adsrParams.attack = 0.006f;
+        adsrParams.decay = 0.24f;
+        adsrParams.sustain = 0.38f;
+        adsrParams.release = 0.30f;
     }
     else if (engine == SynthEngine::velvetNoise)
     {
@@ -173,11 +202,11 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     }
     else
     {
-        // Bright FM with controlled ring.
-        adsrParams.attack = 0.0015f;
-        adsrParams.decay = 0.24f;
+        // Soft bell-pluck with shorter but musical tail.
+        adsrParams.attack = 0.0018f;
+        adsrParams.decay = 0.22f;
         adsrParams.sustain = 0.0f;
-        adsrParams.release = 0.26f;
+        adsrParams.release = 0.20f;
     }
     adsr.setParameters(adsrParams);
     adsr.noteOn();
@@ -215,26 +244,38 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
             {
                 case 0:
                 {
-                    noiseLP += 0.10f * (white - noiseLP);
-                    const auto punch = static_cast<float>(std::exp(-noteAgeSeconds * 32.0f));
-                    voicedPerc = (0.78f * noiseLP + 0.22f * white) * (0.9f * punch + 0.1f);
+                    // 909-like kick: pitch-dropped sine body + short click.
+                    const float pitchDrop = 1.0f + 4.4f * std::exp(-noteAgeSeconds * 48.0f);
+                    const float body = std::sin(currentAngle * pitchDrop);
+                    const float bodyEnv = std::exp(-noteAgeSeconds * 11.5f);
+                    const float clickEnv = std::exp(-noteAgeSeconds * 165.0f);
+                    const float clickTone = std::sin(currentAngle * 10.0);
+                    voicedPerc = 0.95f * body * bodyEnv + 0.19f * clickTone * clickEnv + 0.08f * white * clickEnv;
                     break;
                 }
                 case 1:
                 {
-                    noiseLP += 0.22f * (white - noiseLP);
+                    // 909-ish snare: tonal body + filtered noise snap.
+                    noiseLP += 0.15f * (white - noiseLP);
                     noiseHP = white - noiseLP;
-                    const auto snapEnv = static_cast<float>(std::exp(-noteAgeSeconds * 44.0f));
-                    voicedPerc = (0.72f * noiseHP + 0.28f * white) * snapEnv;
+                    const float snapEnv = std::exp(-noteAgeSeconds * 47.0f);
+                    const float toneEnv = std::exp(-noteAgeSeconds * 20.0f);
+                    const float tone1 = std::sin(currentAngle * 1.86);
+                    const float tone2 = std::sin(currentAngle * 2.71);
+                    const float preSnap = (white - lastNoise);
+                    voicedPerc = 0.42f * tone1 * toneEnv
+                               + 0.18f * tone2 * toneEnv
+                               + (0.62f * noiseHP + 0.18f * preSnap) * snapEnv;
                     break;
                 }
                 case 2:
                 {
-                    noiseLP += 0.30f * (white - noiseLP);
+                    // Closed hat: short metallic burst, less harsh.
+                    noiseLP += 0.24f * (white - noiseLP);
                     noiseHP = white - noiseLP;
-                    const auto hat = static_cast<float>(std::exp(-noteAgeSeconds * 86.0f));
-                    const auto metallic = std::copysign(1.0f, white * 0.85f + noiseHP * 0.15f);
-                    voicedPerc = (0.72f * metallic + 0.28f * noiseHP) * hat;
+                    const float hat = std::exp(-noteAgeSeconds * 92.0f);
+                    const auto metallic = std::copysign(1.0f, white * 0.78f + noiseHP * 0.22f);
+                    voicedPerc = (0.56f * metallic + 0.30f * noiseHP) * hat;
                     break;
                 }
                 case 3:
@@ -242,18 +283,18 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
                 {
                     const auto diff = white - lastNoise;
                     lastNoise = white;
-                    const auto clickEnv = static_cast<float>(std::exp(-noteAgeSeconds * 120.0f));
+                    const auto clickEnv = static_cast<float>(std::exp(-noteAgeSeconds * 96.0f));
                     const auto gate = (sampleHoldCounter <= 0 ? 1.0f : 0.0f);
                     if (sampleHoldCounter <= 0)
                         sampleHoldCounter = 2 + static_cast<int>(noiseSeed & 3u);
                     --sampleHoldCounter;
-                    voicedPerc = (0.84f * diff + 0.16f * white) * clickEnv * gate * 2.2f;
+                    voicedPerc = (0.74f * diff + 0.16f * white) * clickEnv * gate * 1.6f;
                     break;
                 }
             }
 
-            voicedPerc = std::tanh(voicedPerc * 2.1f) * 0.86f;
-            const float sample = voicedPerc * level * env * 1.20f;
+            voicedPerc = std::tanh(voicedPerc * 1.75f) * 0.69f;
+            const float sample = voicedPerc * level * env * 0.80f;
             for (int c = 0; c < outputBuffer.getNumChannels(); ++c)
                 outputBuffer.addSample(c, startSample + s, sample);
 
@@ -273,34 +314,36 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
         float voiced = 0.0f;
         if (engine == SynthEngine::digitalV4)
         {
-            // Nova Drift: warm two-osc blend with slow motion and velvet top end.
-            const auto drift = 0.013 * std::sin(modAngle * 0.09);
-            const auto oscA = std::sin(currentAngle + drift + 0.18 * std::sin(modAngle * 0.21));
-            const auto oscB = std::sin((currentAngle * 1.0045) + 0.24 * std::sin(modAngle * 0.17 + 0.7));
-            const auto oscC = std::sin(currentAngle * 2.0 + 0.11 * std::sin(modAngle * 0.37));
-            const auto raw = static_cast<float>(0.53 * oscA + 0.27 * oscB + 0.11 * oscC + 0.17 * sub + click * 0.035f);
+            // Nova Drift: overtone-rich but consonant, with choir-like movement.
+            const auto vibrato = 0.009 * std::sin(modAngle * 0.14);
+            const auto oscA = std::sin(currentAngle + vibrato);
+            const auto oscB = std::sin(currentAngle * 2.0 + 0.12 * std::sin(modAngle * 0.10));
+            const auto oscC = std::sin(currentAngle * 3.0 + 0.06 * std::sin(modAngle * 0.06));
+            const auto subWarm = std::sin(subAngle + 0.05 * std::sin(modAngle * 0.05));
+            const auto raw = static_cast<float>(0.67 * oscA + 0.14 * oscB + 0.06 * oscC + 0.16 * subWarm + click * 0.002f);
 
-            const auto cutoff = 220.0f + 1650.0f * env + 350.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.05));
+            const auto cutoff = 180.0f + 1020.0f * env + 130.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.03));
             const auto alpha = std::exp(-juce::MathConstants<float>::twoPi * cutoff / sr);
             lpState = alpha * lpState + (1.0f - alpha) * raw;
             const auto hp = raw - lpState;
-            hpState = 0.985f * hpState + 0.015f * hp;
+            hpState = 0.996f * hpState + 0.004f * hp;
 
-            voiced = std::tanh((0.92f * lpState + 0.04f * hpState + 0.10f * sub) * 1.05f) * 0.74f;
+            voiced = std::tanh((0.97f * lpState + 0.005f * hpState + 0.06f * subWarm) * 0.90f) * 0.66f;
         }
         else if (engine == SynthEngine::fmGlass)
         {
-            // Prism FM: inharmonic FM body with decaying index and glassy air partial.
-            const float idx = 3.9f * std::exp(-noteAgeSeconds * 5.3f) + 0.35f;
-            const auto carrier = std::sin(currentAngle + idx * std::sin(modAngle) + 0.22 * std::sin(modAngle * 0.5));
-            const auto side = std::sin(currentAngle * 2.73 + 0.45 * std::sin(modAngle * 1.61));
-            const auto air = std::sin(currentAngle * 5.11 + modAngle * 0.37);
-            const auto raw = static_cast<float>(0.72 * carrier + 0.18 * side + 0.10 * air + click * 0.42f);
+            // Prism FM: harmonic integer-ratio FM with a glassy but sweet top.
+            const float idx = 1.35f * std::exp(-noteAgeSeconds * 7.4f) + 0.08f;
+            const auto carrier = std::sin(currentAngle + idx * std::sin(modAngle));
+            const auto side2 = std::sin(currentAngle * 2.0 + idx * 0.30f * std::sin(modAngle * 0.5));
+            const auto side3 = std::sin(currentAngle * 3.0 + idx * 0.16f * std::sin(modAngle * 0.31));
+            const auto air = std::sin(currentAngle * 4.0 + modAngle * 0.09);
+            const auto raw = static_cast<float>(0.75 * carrier + 0.16 * side2 + 0.06 * side3 + 0.03 * air + click * 0.02f);
 
             const float hp = raw - lpState;
-            lpState += 0.22f * (raw - lpState);
-            hpState += 0.08f * (hp - hpState);
-            voiced = std::tanh((0.82f * raw + 0.22f * hpState) * 1.22f) * 0.79f;
+            lpState += 0.11f * (raw - lpState);
+            hpState += 0.02f * (hp - hpState);
+            voiced = std::tanh((0.94f * raw + 0.05f * hpState) * 0.92f) * 0.66f;
         }
         else
         {
@@ -486,10 +529,16 @@ MainComponent::MainComponent()
 
     snakeA.colour = juce::Colour(0xff00ffaa);
     snakeB.colour = juce::Colour(0xffffb347);
+    snakeC.colour = juce::Colour(0xff9d7bff);
+    snakeD.colour = juce::Colour(0xffff5ed8);
     snakeA.cell = { 0, 0 };
     snakeB.cell = { worldSize - 1, worldSize - 1 };
+    snakeC.cell = { worldSize - 1, 0 };
+    snakeD.cell = { 0, worldSize - 1 };
     snakeA.dir = { 1, 0 };
     snakeB.dir = { -1, 0 };
+    snakeC.dir = { 0, 1 };
+    snakeD.dir = { 0, -1 };
 
     resetBlankWorld();
 
@@ -552,12 +601,32 @@ void MainComponent::resetBlankWorld()
     p2 = { worldSize - 3, worldSize - 3, 0, juce::Colours::orange };
     snakeA.cell = { 0, 0 };
     snakeB.cell = { worldSize - 1, worldSize - 1 };
+    snakeC.cell = { worldSize - 1, 0 };
+    snakeD.cell = { 0, worldSize - 1 };
     snakeA.dir = { 1, 0 };
     snakeB.dir = { -1, 0 };
+    snakeC.dir = { 0, 1 };
+    snakeD.dir = { 0, -1 };
     snakeA.speedState = snakeB.speedState = 1;
     snakeA.ratchet = snakeB.ratchet = 1;
+    snakeC.speedState = snakeD.speedState = 1;
+    snakeC.ratchet = snakeD.ratchet = 1;
     snakeA.trail.clear();
     snakeB.trail.clear();
+    snakeC.trail.clear();
+    snakeD.trail.clear();
+    snakeC.trail.clear();
+    snakeD.trail.clear();
+    modeASnakeCount = 1;
+    p1Points = 0;
+    p2Points = 0;
+    randomRedirectCells.clear();
+    for (auto& col : randomRedirectActive)
+        for (auto& v : col)
+            v = false;
+    for (auto& col : randomRedirectRotation)
+        for (auto& v : col)
+            v = 0;
     pulses.clear();
     sparks.clear();
     globalJuice = 0.0f;
@@ -768,6 +837,39 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
     g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::plain));
     g.setColour(juce::Colours::white.withAlpha(0.7f));
     g.drawText("Use Up/Down + Enter", panel.withY(panel.getBottom() - 34), juce::Justification::centred);
+
+    if (selectingBlankWorldSize)
+    {
+        auto chooser = area.withSizeKeepingCentre(560.0f, 290.0f);
+        g.setColour(juce::Colour(0xee070b14));
+        g.fillRoundedRectangle(chooser, 14.0f);
+        g.setColour(juce::Colour(0xff2df8ff).withAlpha(0.9f));
+        g.drawRoundedRectangle(chooser, 14.0f, 2.0f);
+
+        g.setFont(juce::Font("Avenir Next", 26.0f, juce::Font::bold));
+        g.setColour(juce::Colours::white.withAlpha(0.96f));
+        g.drawText("Choose Time Signature / World Size", chooser.removeFromTop(58.0f).toNearestInt(), juce::Justification::centred);
+
+        const juce::String labels[3] = { "3/4  ->  12x12", "4/4  ->  16x16", "5/4  ->  20x20" };
+        for (int i = 0; i < 3; ++i)
+        {
+            auto row = chooser.removeFromTop(58.0f).reduced(34.0f, 6.0f);
+            const bool sel = (i == blankWorldSignatureIndex);
+            const juce::Colour c = sel ? juce::Colour(0xff16e9ff) : juce::Colour(0x77ffffff);
+            g.setColour(c.withAlpha(sel ? 0.20f : 0.10f));
+            g.fillRoundedRectangle(row, 10.0f);
+            g.setColour(c.withAlpha(sel ? 0.95f : 0.70f));
+            g.drawRoundedRectangle(row, 10.0f, sel ? 2.2f : 1.2f);
+            g.setFont(juce::Font("Avenir Next", sel ? 24.0f : 22.0f, sel ? juce::Font::bold : juce::Font::plain));
+            g.drawText(labels[i], row.toNearestInt(), juce::Justification::centred);
+        }
+
+        g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::plain));
+        g.setColour(juce::Colours::white.withAlpha(0.74f));
+        g.drawText("Up/Down to choose, Enter to confirm, Esc to cancel",
+                   chooser.withTrimmedTop(8.0f).toNearestInt(),
+                   juce::Justification::centred);
+    }
 }
 
 void MainComponent::paintTitle(juce::Graphics& g)
@@ -804,7 +906,8 @@ juce::Point<float> MainComponent::isoToScreen(int x, int y, int z, float tileW, 
 juce::Point<float> MainComponent::getBuildOrigin(float, float tileH) const
 {
     const float floorMidYOffset = (static_cast<float>(worldSize - 1) * tileH * 0.5f);
-    return { getWidth() * 0.5f, getHeight() * 0.5f - floorMidYOffset + 125.0f };
+    const float extraLift = (worldSize >= 20 ? 25.0f : 0.0f);
+    return { getWidth() * 0.5f, getHeight() * 0.5f - floorMidYOffset + 125.0f - extraLift };
 }
 
 juce::Colour MainComponent::pitchClassColour(int semitone) const
@@ -1102,6 +1205,38 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
                    "  Miverb " + juce::String((miverbEnabled && miverbMix > 0.001f) ? "On" : "Off") +
                    " " + juce::String(miverbMix, 2),
                14, 34, getWidth() - 28, 22, juce::Justification::left);
+
+    if (selectingPerformanceMode)
+    {
+        auto panel = getLocalBounds().toFloat().withSizeKeepingCentre(540.0f, 220.0f);
+        g.setColour(juce::Colour(0xee070b14));
+        g.fillRoundedRectangle(panel, 14.0f);
+        g.setColour(juce::Colour(0xff16e9ff).withAlpha(0.9f));
+        g.drawRoundedRectangle(panel, 14.0f, 2.0f);
+
+        g.setColour(juce::Colours::white.withAlpha(0.95f));
+        g.setFont(juce::Font("Avenir Next", 28.0f, juce::Font::bold));
+        g.drawText("Choose Performance Mode", panel.removeFromTop(58.0f).toNearestInt(), juce::Justification::centred);
+
+        const juce::String labels[2] = { "Mode A  (Autonomous Snakes)", "Mode B  (Player-Steered Snakes)" };
+        for (int i = 0; i < 2; ++i)
+        {
+            auto row = panel.removeFromTop(62.0f).reduced(26.0f, 8.0f);
+            const bool sel = (i == pendingPerformanceModeIndex);
+            g.setColour((sel ? juce::Colour(0xff16e9ff) : juce::Colours::white).withAlpha(sel ? 0.20f : 0.10f));
+            g.fillRoundedRectangle(row, 10.0f);
+            g.setColour((sel ? juce::Colour(0xff16e9ff) : juce::Colours::white).withAlpha(sel ? 0.95f : 0.65f));
+            g.drawRoundedRectangle(row, 10.0f, sel ? 2.1f : 1.0f);
+            g.setFont(juce::Font("Avenir Next", sel ? 22.0f : 20.0f, sel ? juce::Font::bold : juce::Font::plain));
+            g.drawText(labels[i], row.toNearestInt(), juce::Justification::centred);
+        }
+
+        g.setFont(juce::Font("Avenir Next", 16.0f, juce::Font::plain));
+        g.setColour(juce::Colours::white.withAlpha(0.72f));
+        g.drawText("Up/Down to choose, Enter to confirm, Esc to cancel",
+                   panel.withTrimmedTop(8.0f).toNearestInt(),
+                   juce::Justification::centred);
+    }
 }
 
 void MainComponent::paintBuild(juce::Graphics& g)
@@ -1211,6 +1346,8 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
 
     drawSnake(snakeA);
     drawSnake(snakeB);
+    if (performanceMode == PerformanceMode::a && modeASnakeCount >= 3) drawSnake(snakeC);
+    if (performanceMode == PerformanceMode::a && modeASnakeCount >= 4) drawSnake(snakeD);
 
     for (const auto& s : sparks)
     {
@@ -1265,6 +1402,25 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
         }
     }
 
+    if (performanceMode == PerformanceMode::b)
+    {
+        for (int y = 0; y < worldSize; ++y)
+        {
+            for (int x = 0; x < worldSize; ++x)
+            {
+                if (! randomRedirectActive[x][y])
+                    continue;
+
+                juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
+                const juce::Point<float> c = r.getCentre();
+                const float a = static_cast<float>(randomRedirectRotation[x][y] % 4) * juce::MathConstants<float>::halfPi;
+                g.setColour(juce::Colour(0xff16e9ff).withAlpha(0.75f));
+                g.drawEllipse(r.reduced(cell * 0.18f), 2.0f);
+                g.drawArrow(juce::Line<float>(c, c + juce::Point<float>(std::cos(a), std::sin(a)) * (cell * 0.24f)), 2.0f, 7.0f, 7.0f);
+            }
+        }
+    }
+
     if (barPulse)
     {
         g.setColour(juce::Colours::white.withAlpha(0.18f));
@@ -1277,9 +1433,15 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
 
     g.setColour(juce::Colours::white.withAlpha(0.88f));
     g.setFont(juce::Font("Avenir Next", 17.0f, juce::Font::plain));
-    g.drawText("PERFORMANCE MODE | Tool " + toolToString(static_cast<ToolType>(selectedToolIndex)) +
+    const juce::String modeLabel = (performanceMode == PerformanceMode::a ? "PERFORMANCE MODE A" : "PERFORMANCE MODE B");
+    const juce::String steerHint = (performanceMode == PerformanceMode::b
+                                        ? " | Steer: P1 WASD P2 Arrows"
+                                        : " | I: Add Snake (" + juce::String(modeASnakeCount) + "/4) | P: Switch A/B");
+    g.drawText(modeLabel + steerHint +
+                   " | Tool " + toolToString(static_cast<ToolType>(selectedToolIndex)) +
                    " | Play " + playModeToString(playMode) +
                    " | Sec " + juce::String(sectionShortName(activeArrangementSection())) +
+                   " | P1 " + juce::String(p1Points) + " P2 " + juce::String(p2Points) +
                    " | BPM " + juce::String(bpm, 1) +
                    " | Key " + juce::String(keyRoot) +
                    " | Scale " + scaleToString(scale) +
@@ -1355,9 +1517,9 @@ void MainComponent::performMenuAction(MenuAction action)
     }
     else if (action == MenuAction::blank)
     {
-        resetBlankWorld();
-        hasVisitedBuildMode = true;
-        mode = Mode::build;
+        beginBlankWorldSizeSelection();
+        repaint();
+        return;
     }
     else if (action == MenuAction::quit)
     {
@@ -1371,6 +1533,26 @@ void MainComponent::performMenuAction(MenuAction action)
     repaint();
 }
 
+void MainComponent::beginBlankWorldSizeSelection()
+{
+    selectingBlankWorldSize = true;
+    blankWorldSignatureIndex = signatureIndexForWorldSize(worldSize);
+}
+
+void MainComponent::confirmBlankWorldSizeSelection()
+{
+    if (blankWorldSignatureIndex == 0) worldSize = 12;
+    else if (blankWorldSignatureIndex == 1) worldSize = 16;
+    else worldSize = 20;
+
+    selectingBlankWorldSize = false;
+    resetBlankWorld();
+    hasVisitedBuildMode = true;
+    mode = Mode::build;
+    hasSession = true;
+    selectedMenu = 0;
+}
+
 void MainComponent::enterBuildMode()
 {
     mode = Mode::build;
@@ -1379,15 +1561,34 @@ void MainComponent::enterBuildMode()
     repaint();
 }
 
-void MainComponent::startPerformanceMode()
+void MainComponent::startPerformanceMode(PerformanceMode targetMode)
 {
     mode = Mode::performance;
+    performanceMode = targetMode;
+    p1Points = 0;
+    p2Points = 0;
     countdownBeats = 4;
     nextBeatLayerBeat = static_cast<double>(beatCounter) + beatPhase;
     performanceMoveAccumulator = 0.0;
     performanceStepCounter = 0;
     snakeA.trail.clear();
     snakeB.trail.clear();
+    randomRedirectCells.clear();
+    for (auto& col : randomRedirectActive)
+        for (auto& v : col)
+            v = false;
+    for (auto& col : randomRedirectRotation)
+        for (auto& v : col)
+            v = 0;
+    if (performanceMode == PerformanceMode::b)
+    {
+        p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
+        p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
+    }
+    else
+    {
+        modeASnakeCount = 1;
+    }
     addJuiceAtCell(worldSize / 2, worldSize / 2, juce::Colour(0xff00ffe5), 1.4f);
     repaint();
 }
@@ -1502,7 +1703,8 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
     if (tools[x][y].type == ToolType::section)
         section = juce::jlimit(0, 4, tools[x][y].state);
 
-    const float beatInBar = static_cast<float>(beatCounter % 4) + static_cast<float>(beatPhase);
+    const int beatsPerBar = beatsPerBarForWorldSize(worldSize);
+    const float beatInBar = static_cast<float>(beatCounter % beatsPerBar) + static_cast<float>(beatPhase);
 
     const auto applyRoleRegister = [&](int note) -> int
     {
@@ -1584,8 +1786,8 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
         }
 
         const float secondsPerBeat = 60.0f / static_cast<float>(juce::jmax(1.0, bpm));
-        const float beatsUntilBeat4 = juce::jmax(0.0f, 3.0f - beatInBar);
-        const float gateUntilBeat4Seconds = juce::jmax(0.01f, beatsUntilBeat4 * secondsPerBeat);
+        const float beatsUntilFinalBeatStart = juce::jmax(0.0f, static_cast<float>(beatsPerBar - 1) - beatInBar);
+        const float gateUntilBeat4Seconds = juce::jmax(0.01f, beatsUntilFinalBeatStart * secondsPerBeat);
         const auto latchGuard = juce::ScopedValueSetter<bool>(chordLatchMode, true);
 
         for (size_t i = 0; i < chosen.size(); ++i)
@@ -1642,13 +1844,13 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
             default: break;
         }
 
-        const int beatSlot = juce::jlimit(0, 3, static_cast<int>(std::floor(beatInBar)));
+        const int beatSlot = juce::jlimit(0, beatsPerBar - 1, static_cast<int>(std::floor(beatInBar)));
         if (beatSlot == 0)
         {
             singleW += 10;
             arpW -= 8;
         }
-        else if (beatSlot == 3)
+        else if (beatSlot == (beatsPerBar - 1))
         {
             singleW -= 10;
             chordW += 6;
@@ -1700,7 +1902,7 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
     }
     else if (style == ImprovStyle::chord)
     {
-        triggerChordFromStack(0.92f);
+        triggerChordFromStack(0.78f);
     }
     else
     {
@@ -1714,6 +1916,12 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
 
 void MainComponent::applyToolToSnake(Snake& snake)
 {
+    if (performanceMode == PerformanceMode::b && randomRedirectActive[snake.cell.x][snake.cell.y])
+    {
+        static constexpr juce::Point<int> dirs[4] = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } };
+        snake.dir = dirs[(randomRedirectRotation[snake.cell.x][snake.cell.y] % 4 + 4) % 4];
+    }
+
     Tool& t = tools[snake.cell.x][snake.cell.y];
 
     switch (t.type)
@@ -1761,8 +1969,57 @@ void MainComponent::applyToolToSnake(Snake& snake)
 
 void MainComponent::advancePerformanceStep()
 {
+    if (performanceMode == PerformanceMode::b)
+    {
+        p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
+        p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
+    }
+
     ++performanceStepCounter;
-    auto stepSnake = [&](Snake& s, int snakeRole, int forcedImprovStyle) -> int
+    if (performanceMode == PerformanceMode::b)
+    {
+        const auto clearRandomCell = [&](const juce::Point<int>& c)
+        {
+            if (! randomRedirectActive[c.x][c.y])
+                return;
+            randomRedirectActive[c.x][c.y] = false;
+            randomRedirectRotation[c.x][c.y] = 0;
+        };
+
+        if ((performanceStepCounter % 2) == 0)
+        {
+            if (rng.nextFloat() < 0.32f)
+            {
+                for (int tries = 0; tries < 12; ++tries)
+                {
+                    const int x = rng.nextInt(worldSize);
+                    const int y = rng.nextInt(worldSize);
+                    if (randomRedirectActive[x][y])
+                        continue;
+                    if (tools[x][y].type != ToolType::none)
+                        continue;
+                    if ((x == snakeA.cell.x && y == snakeA.cell.y) || (x == snakeB.cell.x && y == snakeB.cell.y))
+                        continue;
+                    randomRedirectActive[x][y] = true;
+                    randomRedirectRotation[x][y] = rng.nextInt(4);
+                    randomRedirectCells.push_back({ x, y });
+                    performanceCacheDirty = true;
+                    break;
+                }
+            }
+
+            if (! randomRedirectCells.empty() && rng.nextFloat() < 0.26f)
+            {
+                const int idx = rng.nextInt(static_cast<int>(randomRedirectCells.size()));
+                const auto c = randomRedirectCells[static_cast<size_t>(idx)];
+                clearRandomCell(c);
+                randomRedirectCells.erase(randomRedirectCells.begin() + idx);
+                performanceCacheDirty = true;
+            }
+        }
+    }
+
+    auto stepSnake = [&](Snake& s, Snake& other, int snakeRole, int forcedImprovStyle) -> int
     {
         const int divisor = s.speedState == 0 ? 4 : s.speedState == 1 ? 2 : 1;
         if ((performanceStepCounter % divisor) != 0)
@@ -1780,12 +2037,25 @@ void MainComponent::advancePerformanceStep()
             next = s.cell + s.dir;
         }
 
-        if ((next.x == p1.x && next.y == p1.y) || (next.x == p2.x && next.y == p2.y))
+        if (performanceMode == PerformanceMode::a &&
+            ((next.x == p1.x && next.y == p1.y) || (next.x == p2.x && next.y == p2.y)))
         {
             s.dir = { -s.dir.x, -s.dir.y };
             next = s.cell + s.dir;
             next.x = juce::jlimit(0, worldSize - 1, next.x);
             next.y = juce::jlimit(0, worldSize - 1, next.y);
+        }
+
+        if (performanceMode == PerformanceMode::b && next == other.cell)
+        {
+            if (snakeRole == 0) p1Points = 0;
+            else p2Points = 0;
+
+            s.dir = { -s.dir.x, -s.dir.y };
+            next = s.cell + s.dir;
+            next.x = juce::jlimit(0, worldSize - 1, next.x);
+            next.y = juce::jlimit(0, worldSize - 1, next.y);
+            addJuiceAtCell(s.cell.x, s.cell.y, juce::Colour(0xffff3a6e), 1.1f);
         }
 
         s.cell = next;
@@ -1796,6 +2066,21 @@ void MainComponent::advancePerformanceStep()
         const int stepSection = activeArrangementSection();
         applyToolToSnake(s);
         const int chosenStyle = triggerNoteForCell(s.cell.x, s.cell.y, 0.9f, 0.18f, s.ratchet, stepSection, snakeRole, forcedImprovStyle);
+        if (chosenStyle >= 0)
+        {
+            int complexity = 0;
+            for (int z = 1; z < maxHeight; ++z)
+                if (hasBlock(s.cell.x, s.cell.y, z))
+                    ++complexity;
+
+            if (complexity > 0)
+            {
+                const bool onBeat = (performanceStepCounter % 4) == 0;
+                const int reward = complexity * (onBeat ? 20 : 10);
+                if (snakeRole == 0) p1Points += reward;
+                else p2Points += reward;
+            }
+        }
 
         const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
         const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
@@ -1805,11 +2090,31 @@ void MainComponent::advancePerformanceStep()
         return chosenStyle;
     };
 
-    const int styleA = stepSnake(snakeA, 0, -1);
-    int forcedB = -1;
-    if (styleA >= 0)
-        forcedB = (styleA + 1 + ((performanceStepCounter + barCounter) & 1)) % 3;
-    stepSnake(snakeB, 1, forcedB);
+    if (performanceMode == PerformanceMode::a)
+    {
+        std::array<Snake*, 4> snakes { &snakeA, &snakeB, &snakeC, &snakeD };
+        int previousStyle = -1;
+        for (int i = 0; i < modeASnakeCount; ++i)
+        {
+            int forcedStyle = -1;
+            if (previousStyle >= 0)
+                forcedStyle = (previousStyle + 1 + ((performanceStepCounter + barCounter + i) & 1)) % 3;
+            const int chosen = stepSnake(*snakes[static_cast<size_t>(i)],
+                                         *snakes[static_cast<size_t>((i + 1) % juce::jmax(1, modeASnakeCount))],
+                                         i % 2,
+                                         forcedStyle);
+            if (chosen >= 0)
+                previousStyle = chosen;
+        }
+    }
+    else
+    {
+        const int styleA = stepSnake(snakeA, snakeB, 0, -1);
+        int forcedB = -1;
+        if (styleA >= 0)
+            forcedB = (styleA + 1 + ((performanceStepCounter + barCounter) & 1)) % 3;
+        stepSnake(snakeB, snakeA, 1, forcedB);
+    }
 }
 
 void MainComponent::advanceTransport(double deltaSeconds)
@@ -1837,7 +2142,8 @@ void MainComponent::advanceTransport(double deltaSeconds)
     {
         beatPhase -= 1.0;
         ++beatCounter;
-        barPulse = (beatCounter % 4) == 0;
+        const int beatsPerBar = beatsPerBarForWorldSize(worldSize);
+        barPulse = (beatCounter % beatsPerBar) == 0;
         if (barPulse)
         {
             ++barCounter;
@@ -1939,6 +2245,35 @@ void MainComponent::timerCallback()
 
 bool MainComponent::handleTitleKeys(const juce::KeyPress& key)
 {
+    if (selectingBlankWorldSize)
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            selectingBlankWorldSize = false;
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::upKey)
+        {
+            blankWorldSignatureIndex = (blankWorldSignatureIndex + 2) % 3;
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::downKey)
+        {
+            blankWorldSignatureIndex = (blankWorldSignatureIndex + 1) % 3;
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::returnKey)
+        {
+            confirmBlankWorldSizeSelection();
+            repaint();
+            return true;
+        }
+        return false;
+    }
+
     const auto menu = getTitleMenu();
     selectedMenu = juce::jlimit(0, juce::jmax(0, static_cast<int>(menu.size()) - 1), selectedMenu);
     const auto isEnabledAt = [&](int idx)
@@ -1986,7 +2321,31 @@ bool MainComponent::handleTitleKeys(const juce::KeyPress& key)
 
 bool MainComponent::handleBuildKeys(const juce::KeyPress& key)
 {
-    auto moveCursor = [](PlayerCursor& p, int dx, int dy)
+    if (selectingPerformanceMode)
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            selectingPerformanceMode = false;
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::upKey || key == juce::KeyPress::downKey)
+        {
+            pendingPerformanceModeIndex = 1 - pendingPerformanceModeIndex;
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::returnKey)
+        {
+            selectingPerformanceMode = false;
+            startPerformanceMode(pendingPerformanceModeIndex == 0 ? PerformanceMode::a : PerformanceMode::b);
+            repaint();
+            return true;
+        }
+        return false;
+    }
+
+    auto moveCursor = [this](PlayerCursor& p, int dx, int dy)
     {
         p.x = juce::jlimit(0, worldSize - 1, p.x + dx);
         p.y = juce::jlimit(0, worldSize - 1, p.y + dy);
@@ -2047,7 +2406,8 @@ bool MainComponent::handleBuildKeys(const juce::KeyPress& key)
     }
     else if (key == juce::KeyPress::returnKey)
     {
-        startPerformanceMode();
+        selectingPerformanceMode = true;
+        pendingPerformanceModeIndex = 0;
     }
     else if (c == '-')
     {
@@ -2138,7 +2498,7 @@ bool MainComponent::handleBuildKeys(const juce::KeyPress& key)
 
 bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
 {
-    auto moveCursor = [](PlayerCursor& p, int dx, int dy)
+    auto moveCursor = [this](PlayerCursor& p, int dx, int dy)
     {
         p.x = juce::jlimit(0, worldSize - 1, p.x + dx);
         p.y = juce::jlimit(0, worldSize - 1, p.y + dy);
@@ -2152,15 +2512,48 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
         return true;
     }
 
-    if (key == juce::KeyPress::leftKey) moveCursor(p2, -1, 0);
-    else if (key == juce::KeyPress::rightKey) moveCursor(p2, 1, 0);
-    else if (key == juce::KeyPress::upKey) moveCursor(p2, 0, -1);
-    else if (key == juce::KeyPress::downKey) moveCursor(p2, 0, 1);
-    else if (c == 'w' || c == 'W') moveCursor(p1, 0, -1);
-    else if (c == 's' || c == 'S') moveCursor(p1, 0, 1);
-    else if (c == 'a' || c == 'A') moveCursor(p1, -1, 0);
-    else if (c == 'd' || c == 'D') moveCursor(p1, 1, 0);
-    else if (key == juce::KeyPress::tabKey)
+    bool handledSteer = false;
+    bool movedMarker = false;
+    if (performanceMode == PerformanceMode::b)
+    {
+        if (key == juce::KeyPress::leftKey) { snakeB.dir = { -1, 0 }; handledSteer = true; }
+        else if (key == juce::KeyPress::rightKey) { snakeB.dir = { 1, 0 }; handledSteer = true; }
+        else if (key == juce::KeyPress::upKey) { snakeB.dir = { 0, -1 }; handledSteer = true; }
+        else if (key == juce::KeyPress::downKey) { snakeB.dir = { 0, 1 }; handledSteer = true; }
+        else if (c == 'w' || c == 'W') { snakeA.dir = { 0, -1 }; handledSteer = true; }
+        else if (c == 's' || c == 'S') { snakeA.dir = { 0, 1 }; handledSteer = true; }
+        else if (c == 'a' || c == 'A') { snakeA.dir = { -1, 0 }; handledSteer = true; }
+        else if (c == 'd' || c == 'D') { snakeA.dir = { 1, 0 }; handledSteer = true; }
+
+        if (handledSteer)
+        {
+            p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
+            p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
+            addJuiceAtCell(snakeA.cell.x, snakeA.cell.y, snakeA.colour, 0.24f);
+            addJuiceAtCell(snakeB.cell.x, snakeB.cell.y, snakeB.colour, 0.24f);
+            repaint();
+            return true;
+        }
+    }
+    else
+    {
+        if (key == juce::KeyPress::leftKey) { moveCursor(p2, -1, 0); movedMarker = true; }
+        else if (key == juce::KeyPress::rightKey) { moveCursor(p2, 1, 0); movedMarker = true; }
+        else if (key == juce::KeyPress::upKey) { moveCursor(p2, 0, -1); movedMarker = true; }
+        else if (key == juce::KeyPress::downKey) { moveCursor(p2, 0, 1); movedMarker = true; }
+        else if (c == 'w' || c == 'W') { moveCursor(p1, 0, -1); movedMarker = true; }
+        else if (c == 's' || c == 'S') { moveCursor(p1, 0, 1); movedMarker = true; }
+        else if (c == 'a' || c == 'A') { moveCursor(p1, -1, 0); movedMarker = true; }
+        else if (c == 'd' || c == 'D') { moveCursor(p1, 1, 0); movedMarker = true; }
+    }
+
+    if (movedMarker)
+    {
+        repaint();
+        return true;
+    }
+
+    if (key == juce::KeyPress::tabKey)
     {
         selectedToolIndex = (selectedToolIndex % 6) + 1;
     }
@@ -2199,6 +2592,31 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
     else if (c == 'm' || c == 'M')
     {
         playMode = nextPlayMode(playMode);
+    }
+    else if (c == 'p' || c == 'P')
+    {
+        performanceMode = (performanceMode == PerformanceMode::a ? PerformanceMode::b : PerformanceMode::a);
+        if (performanceMode == PerformanceMode::b)
+        {
+            p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
+            p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
+        }
+        else
+        {
+            randomRedirectCells.clear();
+            for (auto& col : randomRedirectActive)
+                for (auto& v : col)
+                    v = false;
+            for (auto& col : randomRedirectRotation)
+                for (auto& v : col)
+                    v = 0;
+        }
+        addJuiceAtCell(worldSize / 2, worldSize / 2, juce::Colour(0xff00fff2), 0.9f);
+    }
+    else if ((c == 'i' || c == 'I') && performanceMode == PerformanceMode::a)
+    {
+        modeASnakeCount = juce::jmin(4, modeASnakeCount + 1);
+        addJuiceAtCell(worldSize / 2, worldSize / 2, juce::Colour(0xff9d7bff), 0.95f);
     }
     else if (c == 'n' || c == 'N')
     {
@@ -2346,6 +2764,7 @@ void MainComponent::writeWorldToFile(const juce::File& targetFile)
 
     root->setProperty("columns", columnRows);
     root->setProperty("tools", toolRows);
+    root->setProperty("worldSize", worldSize);
     root->setProperty("bpm", bpm);
     root->setProperty("keyRoot", keyRoot);
     root->setProperty("scale", static_cast<int>(scale));
@@ -2370,6 +2789,11 @@ void MainComponent::loadWorldFromFile()
     auto* obj = parsed.getDynamicObject();
     if (obj == nullptr)
         return;
+
+    if (obj->hasProperty("worldSize"))
+        worldSize = juce::jlimit(12, maxWorldSize, static_cast<int>(obj->getProperty("worldSize")));
+    else
+        worldSize = 16;
 
     resetBlankWorld();
 
@@ -2478,10 +2902,10 @@ const char* MainComponent::beatStyleName(int style) const
     switch (style)
     {
         case 0: return "Off";
-        case 1: return "909 Rez Drive";
-        case 2: return "909 Oval Glitch";
-        case 3: return "909 Broken Pulse";
-        case 4: return "909 Hyper Grid";
+        case 1: return "909 Rez Straight";
+        case 2: return "909 Tight Pulse";
+        case 3: return "909 Forward Step";
+        case 4: return "909 Rail Line";
         default: break;
     }
     return "Off";
@@ -2492,43 +2916,45 @@ void MainComponent::triggerBeatLayer(double beatTime)
     if (beatStyle <= 0)
         return;
 
-    const auto beatInBar = std::fmod(beatTime, 4.0);
-    const auto wrapped = (beatInBar < 0.0 ? beatInBar + 4.0 : beatInBar);
-    const auto step = static_cast<int>(std::floor(wrapped * 4.0 + 1.0e-6)) % 16;
+    const int beatsPerBar = beatsPerBarForWorldSize(worldSize);
+    const int stepsPerBar = beatsPerBar * 4; // 16th grid
+    const auto beatInBar = std::fmod(beatTime, static_cast<double>(beatsPerBar));
+    const auto wrapped = (beatInBar < 0.0 ? beatInBar + static_cast<double>(beatsPerBar) : beatInBar);
+    const auto step = static_cast<int>(std::floor(wrapped * 4.0 + 1.0e-6)) % stepsPerBar;
+    const auto beatAtStep = [stepsPerBar, beatsPerBar](int beat) { return (beat * stepsPerBar) / beatsPerBar; };
 
     auto hit = [this] (int midiNote, float velocity)
     {
-        triggerBeatMidi(midiNote, juce::jlimit(0.0f, 1.0f, velocity * 1.20f));
+        // Keep beats more supportive/subtle under melodic material.
+        triggerBeatMidi(midiNote, juce::jlimit(0.0f, 1.0f, velocity * 0.90f));
     };
 
     switch (beatStyle)
     {
         case 1:
-            if (step == 0 || step == 4 || step == 8 || step == 12) hit(120, 0.92f);
-            if (step == 4 || step == 12) hit(121, 0.74f);
-            if ((step % 2) == 1) hit(122, 0.30f + ((step % 4) == 3 ? 0.14f : 0.0f));
-            if (step == 15) hit(123, 0.32f);
+            if ((step % 4) == 0) hit(120, 0.82f);
+            if (step == beatAtStep(1) || (beatsPerBar >= 4 && step == beatAtStep(3))) hit(121, 0.60f);
+            if ((step % 2) == 1) hit(122, 0.18f + ((step % 4) == 3 ? 0.05f : 0.0f));
             break;
 
         case 2:
-            if (step == 0 || step == 9) hit(120, 0.80f);
-            if (step == 6 || step == 14) hit(121, 0.56f);
-            if (step == 3 || step == 6 || step == 7 || step == 10 || step == 11 || step == 15) hit(123, 0.44f);
-            if (step == 1 || step == 5 || step == 9 || step == 13) hit(122, 0.24f);
+            if (step == 0 || step == beatAtStep(2) || step == beatAtStep(beatsPerBar - 1)) hit(120, 0.78f);
+            if (step == beatAtStep(1) || (beatsPerBar >= 4 && step == beatAtStep(3))) hit(121, 0.58f);
+            if ((step % 2) == 1) hit(122, 0.17f);
+            if (step == (stepsPerBar - 1)) hit(123, 0.18f);
             break;
 
         case 3:
-            if (step == 0 || step == 5 || step == 11) hit(120, 0.88f);
-            if (step == 8 || step == 14) hit(121, 0.62f);
-            if (step == 2 || step == 3 || step == 6 || step == 7 || step == 10 || step == 13 || step == 15) hit(122, 0.28f);
-            if (step == 9 || step == 12) hit(123, 0.32f);
+            if (step == 0 || step == (stepsPerBar / 2) || step == (stepsPerBar - 2)) hit(120, 0.76f);
+            if (step == beatAtStep(1) || (beatsPerBar >= 4 && step == beatAtStep(3))) hit(121, 0.56f);
+            if ((step % 2) == 1) hit(122, 0.16f + ((step == (stepsPerBar - 5) || step == (stepsPerBar - 1)) ? 0.05f : 0.0f));
             break;
 
         case 4:
-            if (step == 0 || step == 4 || step == 8 || step == 12) hit(120, 0.95f);
-            if (step == 4 || step == 12) hit(121, 0.68f);
-            if (step != 0 && step != 4 && step != 8 && step != 12) hit(122, 0.24f + ((step % 4) == 3 ? 0.10f : 0.0f));
-            if (step == 2 || step == 6 || step == 10 || step == 15) hit(123, 0.35f);
+            if ((step % 4) == 0) hit(120, 0.72f);
+            if (step == beatAtStep(1) || (beatsPerBar >= 4 && step == beatAtStep(3))) hit(121, 0.52f);
+            if ((step % 2) == 1) hit(122, 0.15f);
+            if (step == beatAtStep(beatsPerBar - 2) || step == (stepsPerBar - 1)) hit(123, 0.16f);
             break;
 
         default:
