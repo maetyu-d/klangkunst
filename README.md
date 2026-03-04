@@ -1,6 +1,6 @@
 # KlangKunst
 
-Part instrument, part sound toy, part architectural sandbox.
+Part local multiplayer instrument, part sound toy, part architectural sandbox.
 
 ![](https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.50.30.png)
 
