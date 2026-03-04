@@ -2,6 +2,8 @@
 
 Part instrument, part sound toy, part architectural sandbox.
 
+!()[https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.53.49.png]
+
 ## Build
 
 ```bash
