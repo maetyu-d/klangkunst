@@ -26,12 +26,6 @@ PERFORMANCE MODE C
 
 ![](https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.53.49.png)
 
-## Build
-
-```bash
-cmake -S . -B build -DJUCE_DIR=/absolute/path/to/JUCE
-cmake --build build -j
-```
 
 ## Title Controls
 
@@ -82,4 +76,11 @@ Menu:
 - bpm, key root, scale
 
 Default save location:
-- `/Users/<you>/Documents/KlangKunstWorld.klangkunst.json`
+- `/Users/<you>/Documents/KlangKunstWorld.mat`
+
+## Build
+
+```bash
+cmake -S . -B build -DJUCE_DIR=/absolute/path/to/JUCE
+cmake --build build -j
+```
