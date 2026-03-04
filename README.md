@@ -10,6 +10,8 @@ The are two modes and three sub-modes.
 
 After the title screen, BUILD MODE provides a 12x12 to 20x20 world editor for two local players. 
 
+![](https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.50.44.png)
+
 PERFORMANCE MODE then offers three types of snake-based musical performance for the two local players, each with different aims and rules but based on a consistent, centred top-down view with tile tools and transport-synced triggering.
 
 PERFORMANCE MODE A
