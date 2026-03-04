@@ -16,6 +16,8 @@ PERFORMANCE MODE then offers three types of snake-based musical performance for 
 
 PERFORMANCE MODE A
 
+![](https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.52.15.png)
+
 PERFORMANCE MODE B
 
 PERFORMANCE MODE C
