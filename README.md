@@ -4,18 +4,27 @@ Part instrument, part sound toy, part architectural sandbox.
 
 ![](https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.50.30.png)
 
+## Modes
+
+The are two modes and three sub-modes.
+
+After the title screen, BUILD MODE provides a 12x12 to 20x20 world editor for two local players. 
+
+PERFORMANCE MODE then offers three types of snake-based musical performance for the two local players, each with different aims and rules but based on a consistent, centred top-down view with tile tools and transport-synced triggering.
+
+PERFORMANCE MODE A
+
+PERFORMANCE MODE B
+
+PERFORMANCE MODE C
+
+
 ## Build
 
 ```bash
 cmake -S . -B build -DJUCE_DIR=/absolute/path/to/JUCE
 cmake --build build -j
 ```
-
-## Modes
-
-- `Title`: neon-psychedelic animated vector title screen with keyboard menu.
-- `Build`: isometric 16x16 world editor with two local players and immediate pitch audition.
-- `Performance`: centered top-down snake performance view with persistent tile tools and transport-synced triggering.
 
 ## Title Controls
 
