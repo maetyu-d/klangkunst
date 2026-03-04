@@ -20,6 +20,8 @@ PERFORMANCE MODE A
 
 PERFORMANCE MODE B
 
+![](https://github.com/maetyu-d/klangkunst/blob/main/Screenshot%202026-03-04%20at%2021.52.45.png)
+
 PERFORMANCE MODE C
 
 
