@@ -54,7 +54,6 @@ juce::String synthToString(MainComponent::SynthEngine s)
         case MainComponent::SynthEngine::fmGlass: return "Prism FM";
         case MainComponent::SynthEngine::velvetNoise: return "Mallet Bloom";
         case MainComponent::SynthEngine::chipPulse: return "Arcade Pulse";
-        case MainComponent::SynthEngine::ovalGlitch: return "Oval Glitch";
         case MainComponent::SynthEngine::guitarPluck: return "Guitar Pluck";
     }
     return "Nova Drift";
@@ -75,7 +74,7 @@ MainComponent::PlayMode nextPlayMode(MainComponent::PlayMode p)
 MainComponent::SynthEngine nextSynth(MainComponent::SynthEngine s)
 {
     const int v = static_cast<int>(s);
-    return static_cast<MainComponent::SynthEngine>((v + 1) % 6);
+    return static_cast<MainComponent::SynthEngine>((v + 1) % 5);
 }
 
 juce::File worldSaveFile()
@@ -134,8 +133,6 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         modDelta = cyclesPerSample * 0.613 * juce::MathConstants<double>::twoPi;
     else if (engine == SynthEngine::chipPulse)
         modDelta = cyclesPerSample * 4.0 * juce::MathConstants<double>::twoPi;
-    else if (engine == SynthEngine::ovalGlitch)
-        modDelta = cyclesPerSample * 2.414 * juce::MathConstants<double>::twoPi;
     else if (engine == SynthEngine::guitarPluck)
         modDelta = cyclesPerSample * 2.01 * juce::MathConstants<double>::twoPi;
     else
@@ -169,10 +166,6 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
     noiseHP = 0.0f;
     lastNoise = 0.0f;
     chipSfxType = 0;
-    ovalSkipPhaseLatch = 0.0f;
-    ovalSkipSampleHold = 0.0f;
-    ovalSkipDecimCounter = 0;
-    ovalSkipDecimPeriod = 1;
     ksDelay.clear();
     ksIndex = 0;
     ksLast = 0.0f;
@@ -239,14 +232,6 @@ void MainComponent::WaveVoice::startNote(int midiNoteNumber, float velocity, juc
         adsrParams.decay = 0.075f;
         adsrParams.sustain = 0.10f;
         adsrParams.release = 0.045f;
-    }
-    else if (engine == SynthEngine::ovalGlitch)
-    {
-        // Oval Glitch: short, punchy laser stab.
-        adsrParams.attack = 0.0003f;
-        adsrParams.decay = 0.050f;
-        adsrParams.sustain = 0.03f;
-        adsrParams.release = 0.035f;
     }
     else if (engine == SynthEngine::guitarPluck)
     {
@@ -474,54 +459,6 @@ void MainComponent::WaveVoice::renderNextBlock(juce::AudioBuffer<float>& outputB
             hpState = 0.975f * hpState + 0.025f * (stepped - lpState);
             lpState = stepped;
             voiced = static_cast<float>(std::tanh((0.84f * stepped + 0.18f * hpState) * 0.96f) * 0.72f);
-        }
-        else if (engine == SynthEngine::ovalGlitch)
-        {
-            // Oval Glitch: pitched laser-noise melody.
-            if (--sampleHoldCounter <= 0)
-            {
-                sampleHoldPeriod = juce::jlimit(9, 30, 9 + static_cast<int>((noiseSeed >> 9) & 15u));
-                sampleHoldCounter = sampleHoldPeriod;
-                sampleHoldValue = static_cast<float>((static_cast<int>((noiseSeed >> 12) & 1023u) - 511) * (1.0 / 511.0));
-                ovalSkipPhaseLatch = static_cast<float>(currentAngle);
-                ovalSkipDecimPeriod = juce::jlimit(2, 8, 2 + static_cast<int>((noiseSeed >> 18) & 3u));
-            }
-
-            const float wow = 0.008f * static_cast<float>(std::sin(modAngle * 0.05));
-            const float flutter = 0.0028f * static_cast<float>(std::sin(modAngle * 0.73 + 0.7));
-            const float jitter = sampleHoldValue * 0.0012f;
-            const float basePhase = static_cast<float>(currentAngle) + wow + flutter + jitter;
-
-            // Laser-style pitch sweep around note center.
-            const float sweep = 1.0f + 1.18f * std::exp(-noteAgeSeconds * 16.0f);
-            const float wobbleSweep = 0.07f * static_cast<float>(std::sin(modAngle * 0.12));
-            const float laserPhase = basePhase * (sweep + wobbleSweep);
-
-            // Keep a subtle "disc skip" window to preserve Oval personality.
-            const float skipRate = 7.0f + 3.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.041));
-            const float skipClock = std::fmod(noteAgeSeconds * skipRate + static_cast<float>(std::abs(sampleHoldValue)) * 0.19f, 1.0f);
-            const bool inSkipWindow = (skipClock < 0.18f);
-            const float phase = inSkipWindow ? (0.25f * laserPhase + 0.75f * ovalSkipPhaseLatch) : laserPhase;
-
-            const float laserMain = static_cast<float>(std::sin(phase));
-            const float laserEdge = static_cast<float>(std::sin(phase * 2.93f + 0.22f * std::sin(modAngle * 0.16)));
-            const float ring = static_cast<float>(std::sin(phase * 4.12f + modAngle * 0.08));
-            const float hiss = white * std::exp(-noteAgeSeconds * 11.0f) * 0.11f;
-            float raw = 0.56f * laserMain + 0.24f * laserEdge + 0.13f * ring + hiss + click * 0.014f;
-
-            if (++ovalSkipDecimCounter >= ovalSkipDecimPeriod)
-            {
-                ovalSkipDecimCounter = 0;
-                ovalSkipSampleHold = raw;
-            }
-            raw = 0.58f * ovalSkipSampleHold + 0.42f * raw;
-
-            const float cutoff = 620.0f + 3200.0f * env + 210.0f * static_cast<float>(0.5 + 0.5 * std::sin(modAngle * 0.03));
-            const float alpha = std::exp(-juce::MathConstants<float>::twoPi * cutoff / sr);
-            lpState = alpha * lpState + (1.0f - alpha) * raw;
-            const float hp = raw - lpState;
-            hpState = 0.986f * hpState + 0.014f * hp;
-            voiced = static_cast<float>(std::tanh((0.80f * lpState + 0.20f * hpState) * 1.12f) * 0.74f);
         }
         else if (engine == SynthEngine::guitarPluck)
         {
@@ -752,7 +689,7 @@ MainComponent::MainComponent()
     setSize(1440, 900);
     setAudioChannels(0, 2);
     lastTimerMs = juce::Time::getMillisecondCounterHiRes();
-    startTimerHz(30);
+    startTimerHz(60);
 }
 
 MainComponent::~MainComponent()
@@ -775,7 +712,61 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     bufferToFill.clearActiveBufferRegion();
 
     const juce::ScopedLock sl(synthLock);
-    synth.renderNextBlock(*bufferToFill.buffer, juce::MidiBuffer(), bufferToFill.startSample, bufferToFill.numSamples);
+    const float blockSeconds = static_cast<float>(bufferToFill.numSamples / juce::jmax(1.0, currentSr));
+    const float invSr = static_cast<float>(1.0 / juce::jmax(1.0, currentSr));
+    juce::MidiBuffer synthEvents;
+    juce::MidiBuffer beatEvents;
+
+    // Drive transport in the audio callback for stable beat timing and step cadence.
+    advanceTransport(blockSeconds, &beatEvents, &synthEvents, bufferToFill.numSamples);
+
+    // Process delayed note-ons on the audio thread with in-block sample offsets.
+    for (auto it = pendingNoteOns.begin(); it != pendingNoteOns.end();)
+    {
+        if (it->secondsRemaining <= blockSeconds)
+        {
+            const int onOffset = juce::jlimit(0, juce::jmax(0, bufferToFill.numSamples - 1),
+                                              static_cast<int>(std::round(it->secondsRemaining * currentSr)));
+            synthEvents.addEvent(juce::MidiMessage::noteOn(1, it->note, juce::jlimit(0.0f, 1.0f, it->velocity)), onOffset);
+
+            const int noteLengthSamples = juce::jmax(1, static_cast<int>(std::round(it->lengthSeconds * currentSr)));
+            const int offOffset = onOffset + noteLengthSamples;
+            if (offOffset < bufferToFill.numSamples)
+            {
+                synthEvents.addEvent(juce::MidiMessage::noteOff(1, it->note), offOffset);
+            }
+            else
+            {
+                const float overflow = static_cast<float>(offOffset - bufferToFill.numSamples) * invSr;
+                pendingNoteOffs.push_back({ it->note, juce::jmax(0.001f, overflow) });
+            }
+            it = pendingNoteOns.erase(it);
+        }
+        else
+        {
+            it->secondsRemaining -= blockSeconds;
+            ++it;
+        }
+    }
+
+    // Process delayed note-offs on the audio thread with in-block sample offsets.
+    for (auto it = pendingNoteOffs.begin(); it != pendingNoteOffs.end();)
+    {
+        if (it->secondsRemaining <= blockSeconds)
+        {
+            const int offOffset = juce::jlimit(0, juce::jmax(0, bufferToFill.numSamples - 1),
+                                               static_cast<int>(std::round(it->secondsRemaining * currentSr)));
+            synthEvents.addEvent(juce::MidiMessage::noteOff(1, it->note), offOffset);
+            it = pendingNoteOffs.erase(it);
+        }
+        else
+        {
+            it->secondsRemaining -= blockSeconds;
+            ++it;
+        }
+    }
+
+    synth.renderNextBlock(*bufferToFill.buffer, synthEvents, bufferToFill.startSample, bufferToFill.numSamples);
     if (miverbEnabled && miverbMix > 0.001f)
     {
         miverb.setMix(miverbMix);
@@ -787,7 +778,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     }
 
     // Beat layer is rendered post-reverb so it always stays dry/punchy.
-    beatSynth.renderNextBlock(*bufferToFill.buffer, juce::MidiBuffer(), bufferToFill.startSample, bufferToFill.numSamples);
+    beatSynth.renderNextBlock(*bufferToFill.buffer, beatEvents, bufferToFill.startSample, bufferToFill.numSamples);
 }
 
 void MainComponent::releaseResources()
@@ -825,6 +816,41 @@ void MainComponent::resetBlankWorld()
     snakeC.trail.clear();
     snakeD.trail.clear();
     modeASnakeCount = 1;
+    modeCSnakeCountP1 = 1;
+    modeCSnakeCountP2 = 1;
+    modeCPushP1 = {};
+    modeCPushP2 = {};
+    for (int i = 0; i < 4; ++i)
+    {
+        modeCSnakesP1[static_cast<size_t>(i)] = {};
+        modeCSnakesP2[static_cast<size_t>(i)] = {};
+    }
+
+    modeCSnakesP1[0].cell = { 0, worldSize - 1 };
+    modeCSnakesP1[0].dir = { 1, 0 };
+    modeCSnakesP1[0].colour = juce::Colour(0xffffb347);
+    modeCSnakesP1[1].cell = { worldSize - 1, 0 };
+    modeCSnakesP1[1].dir = { 0, 1 };
+    modeCSnakesP1[1].colour = juce::Colour(0xffff9f52);
+    modeCSnakesP1[2].cell = { worldSize - 1, worldSize - 1 };
+    modeCSnakesP1[2].dir = { -1, 0 };
+    modeCSnakesP1[2].colour = juce::Colour(0xffffc56f);
+    modeCSnakesP1[3].cell = { 0, 0 };
+    modeCSnakesP1[3].dir = { 0, -1 };
+    modeCSnakesP1[3].colour = juce::Colour(0xffffd38a);
+
+    modeCSnakesP2[0].cell = { worldSize - 1, 0 };
+    modeCSnakesP2[0].dir = { -1, 0 };
+    modeCSnakesP2[0].colour = juce::Colour(0xff00ffaa);
+    modeCSnakesP2[1].cell = { 0, worldSize - 1 };
+    modeCSnakesP2[1].dir = { 0, -1 };
+    modeCSnakesP2[1].colour = juce::Colour(0xff18f0ff);
+    modeCSnakesP2[2].cell = { worldSize - 1, worldSize - 1 };
+    modeCSnakesP2[2].dir = { 0, -1 };
+    modeCSnakesP2[2].colour = juce::Colour(0xff5de3ff);
+    modeCSnakesP2[3].cell = { 0, 0 };
+    modeCSnakesP2[3].dir = { 1, 0 };
+    modeCSnakesP2[3].colour = juce::Colour(0xff4de1a6);
     p1Points = 0;
     p2Points = 0;
     randomRedirectCells.clear();
@@ -911,45 +937,53 @@ void MainComponent::updateTitleCache()
     const auto area = getLocalBounds().toFloat();
     const auto c = area.getCentre();
 
-    juce::ColourGradient bg(juce::Colour::fromHSV(std::fmod(titlePhase * 0.1f, 1.0f), 0.7f, 0.08f, 1.0f),
+    juce::ColourGradient bg(juce::Colour::fromHSV(std::fmod(titlePhase * 0.13f, 1.0f), 0.82f, 0.10f, 1.0f),
                             0, 0,
-                            juce::Colour::fromHSV(std::fmod(titlePhase * 0.1f + 0.3f, 1.0f), 0.85f, 0.18f, 1.0f),
+                            juce::Colour::fromHSV(std::fmod(titlePhase * 0.13f + 0.3f, 1.0f), 0.96f, 0.26f, 1.0f),
                             area.getWidth(), area.getHeight(),
                             false);
-    bg.addColour(0.5, juce::Colour::fromHSV(std::fmod(titlePhase * 0.1f + 0.6f, 1.0f), 0.7f, 0.12f, 1.0f));
+    bg.addColour(0.5, juce::Colour::fromHSV(std::fmod(titlePhase * 0.13f + 0.6f, 1.0f), 0.82f, 0.18f, 1.0f));
     g.setGradientFill(bg);
     g.fillAll();
 
-    for (int ring = 0; ring < 8; ++ring)
+    g.setColour(juce::Colour::fromRGBA(255, 68, 180, 22));
+    g.fillEllipse(c.x - 560.0f, c.y - 380.0f, 1120.0f, 760.0f);
+    g.setColour(juce::Colour::fromRGBA(35, 220, 255, 20));
+    g.fillEllipse(c.x - 760.0f, c.y - 520.0f, 1520.0f, 1040.0f);
+
+    for (int ring = 0; ring < 14; ++ring)
     {
-        const float r = 80.0f + ring * 56.0f;
+        const float t = static_cast<float>(ring) / 13.0f;
+        const float r = 70.0f + ring * 66.0f;
         juce::Path poly;
         const int sides = 6 + (ring % 5);
         for (int i = 0; i <= sides; ++i)
         {
-            const float a = (juce::MathConstants<float>::twoPi * i / sides) + titlePhase * (0.06f + ring * 0.01f);
-            const juce::Point<float> p(c.x + std::cos(a) * r, c.y + std::sin(a) * r);
+            const float a = (juce::MathConstants<float>::twoPi * i / sides) + titlePhase * (0.08f + ring * 0.015f) + t * 1.9f;
+            const juce::Point<float> p(c.x + std::cos(a) * r,
+                                       c.y + std::sin(a) * r * (0.86f + 0.12f * std::sin(titlePhase + t * 4.0f)));
             if (i == 0)
                 poly.startNewSubPath(p);
             else
                 poly.lineTo(p);
         }
-        const auto col = juce::Colour::fromHSV(std::fmod(0.12f * ring + titlePhase * 0.05f, 1.0f), 0.8f, 0.75f, 0.42f);
+        const auto col = juce::Colour::fromHSV(std::fmod(0.10f * ring + titlePhase * 0.08f, 1.0f), 0.92f, 0.95f, 0.30f + 0.18f * (1.0f - t));
         g.setColour(col);
-        g.strokePath(poly, juce::PathStrokeType(2.2f));
+        g.strokePath(poly, juce::PathStrokeType(1.4f + 2.0f * (1.0f - t)));
     }
 
-    for (int i = 0; i < 64; ++i)
+    for (int i = 0; i < 104; ++i)
     {
-        const float a = (juce::MathConstants<float>::twoPi * i / 64.0f) + titlePhase * 0.22f;
+        const float t = static_cast<float>(i) / 103.0f;
+        const float a = (juce::MathConstants<float>::twoPi * t) + titlePhase * 0.30f;
         const float r0 = 30.0f + (i % 3) * 14.0f;
-        const float r1 = area.getWidth() * 0.52f;
-        g.setColour(juce::Colour::fromHSV(std::fmod(0.015f * i + titlePhase * 0.08f, 1.0f), 0.7f, 0.8f, 0.23f));
+        const float r1 = area.getWidth() * 0.64f;
+        g.setColour(juce::Colour::fromHSV(std::fmod(0.7f + 0.55f * t + titlePhase * 0.06f, 1.0f), 0.85f, 0.95f, 0.14f + 0.16f * (1.0f - t)));
         g.drawLine(c.x + std::cos(a) * r0,
                    c.y + std::sin(a) * r0,
                    c.x + std::cos(a) * r1,
                    c.y + std::sin(a) * r1,
-                   1.0f);
+                   0.8f + 1.4f * (1.0f - t));
     }
 
     titleCacheDirty = false;
@@ -961,23 +995,20 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
     const auto centre = area.getCentre();
     const float wobble = std::sin(titlePhase * 1.7f) * (3.0f + globalJuice * 14.0f);
 
-    g.setColour(juce::Colour::fromHSV(std::fmod(titlePhase * 0.12f, 1.0f), 0.7f, 0.8f, 0.09f + globalJuice * 0.18f));
+    g.setColour(juce::Colour::fromHSV(std::fmod(titlePhase * 0.16f, 1.0f), 0.82f, 0.95f, 0.12f + globalJuice * 0.24f));
     g.fillEllipse(centre.x - 180.0f - wobble, centre.y - 180.0f - wobble, 360.0f + wobble * 2.0f, 360.0f + wobble * 2.0f);
 
-    for (int y = 0; y < getHeight(); y += 3)
+    for (int y = 0; y < getHeight(); y += 2)
     {
-        g.setColour(juce::Colour(0x10ffffff));
+        g.setColour(juce::Colour::fromRGBA(180, 220, 255, 20));
         g.drawHorizontalLine(y, 0.0f, static_cast<float>(getWidth()));
     }
 
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 7; ++i)
     {
-        g.setColour(juce::Colour::fromHSV(std::fmod(titlePhase * 0.15f + 0.2f * i, 1.0f), 0.9f, 0.95f, 0.11f));
-        g.drawEllipse(centre.x - 95.0f - i * 9.0f,
-                      centre.y - 95.0f - i * 9.0f,
-                      190.0f + i * 18.0f,
-                      190.0f + i * 18.0f,
-                      2.0f);
+        const float r = 95.0f + i * 12.0f;
+        g.setColour(juce::Colour::fromHSV(std::fmod(titlePhase * 0.19f + 0.14f * i, 1.0f), 0.95f, 1.0f, 0.08f + 0.08f * (1.0f - static_cast<float>(i) / 7.0f)));
+        g.drawEllipse(centre.x - r, centre.y - r, r * 2.0f, r * 2.0f, 1.8f + 0.6f * (1.0f - static_cast<float>(i) / 7.0f));
     }
 
     for (const auto& s : sparks)
@@ -1009,8 +1040,10 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
     juce::Rectangle<int> panel(getWidth() / 2 - 230, getHeight() / 2 - panelHeight / 2, 460, panelHeight);
     g.setColour(juce::Colours::black.withAlpha(0.55f));
     g.fillRoundedRectangle(panel.toFloat(), 8.0f);
-    g.setColour(juce::Colour(0xff00f6ff).withAlpha(0.12f + globalJuice * 0.28f));
-    g.drawRoundedRectangle(panel.toFloat().expanded(6.0f), 12.0f, 5.0f);
+    g.setColour(juce::Colour(0xff00f6ff).withAlpha(0.18f + globalJuice * 0.34f));
+    g.drawRoundedRectangle(panel.toFloat().expanded(8.0f), 12.0f, 6.0f);
+    g.setColour(juce::Colour(0xffff3ac4).withAlpha(0.12f + globalJuice * 0.24f));
+    g.drawRoundedRectangle(panel.toFloat().expanded(14.0f), 18.0f, 3.0f);
     g.setColour(juce::Colours::white.withAlpha(0.85f));
     g.drawRoundedRectangle(panel.toFloat(), 8.0f, 2.0f);
 
@@ -1032,10 +1065,10 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
         juce::Rectangle<int> row(panel.getX() + 20, panel.getY() + 65 + static_cast<int>(i) * 56, panel.getWidth() - 40, 42);
         if (static_cast<int>(i) == selectedMenu && enabled)
         {
-            g.setColour(juce::Colour::fromRGBA(20, 220, 255, 80));
+            g.setColour(juce::Colour::fromRGBA(20, 220, 255, 108));
             g.fillRoundedRectangle(row.toFloat(), 6.0f);
             g.setColour(juce::Colours::cyan);
-            g.drawRoundedRectangle(row.toFloat(), 6.0f, 1.5f);
+            g.drawRoundedRectangle(row.toFloat(), 6.0f, 2.2f);
         }
         g.setColour(juce::Colours::white.withAlpha(enabled ? 0.95f : 0.35f));
         g.drawText(text, row, juce::Justification::centred);
@@ -1082,9 +1115,9 @@ void MainComponent::drawTitleLiveOverlays(juce::Graphics& g)
 void MainComponent::paintTitle(juce::Graphics& g)
 {
     updateTitleCache();
-    const float shakeAmount = screenShake * 20.0f;
-    const float dx = (rng.nextFloat() * 2.0f - 1.0f) * shakeAmount;
-    const float dy = (rng.nextFloat() * 2.0f - 1.0f) * shakeAmount;
+    const float shakeAmount = screenShake * 10.0f;
+    const float dx = std::sin(titlePhase * 27.0f) * shakeAmount;
+    const float dy = std::cos(titlePhase * 31.0f) * shakeAmount;
     g.addTransform(juce::AffineTransform::translation(dx, dy));
     g.drawImageAt(titleCache, 0, 0);
     drawTitleLiveOverlays(g);
@@ -1161,6 +1194,83 @@ int MainComponent::topBlockZ(int x, int y) const
         if ((cell & (1u << static_cast<uint32_t>(z))) != 0u)
             return z;
     return 0;
+}
+
+bool MainComponent::slideColumnOnce(int x, int y, int dx, int dy)
+{
+    if (x < 0 || y < 0 || x >= worldSize || y >= worldSize)
+        return false;
+
+    const int tx = x + dx;
+    const int ty = y + dy;
+    if (tx < 0 || ty < 0 || tx >= worldSize || ty >= worldSize)
+        return false;
+
+    auto& src = columns[static_cast<size_t>(x)][static_cast<size_t>(y)];
+    auto& dst = columns[static_cast<size_t>(tx)][static_cast<size_t>(ty)];
+    if (src == 0u || dst != 0u)
+        return false;
+
+    dst = src;
+    src = 0u;
+    return true;
+}
+
+bool MainComponent::trySlideColumnWithEffort(PlayerCursor& actor, int dx, int dy, PushAccumulator& pushState, juce::Colour c)
+{
+    if (dx == 0 && dy == 0)
+        return false;
+
+    const int sx = actor.x + dx;
+    const int sy = actor.y + dy;
+    const int tx = sx + dx;
+    const int ty = sy + dy;
+
+    const bool sameTarget = (pushState.x == sx && pushState.y == sy &&
+                             pushState.dx == dx && pushState.dy == dy);
+    if (! sameTarget)
+    {
+        pushState.x = sx;
+        pushState.y = sy;
+        pushState.dx = dx;
+        pushState.dy = dy;
+        pushState.charge = 0;
+    }
+
+    const bool sourceInvalid = (sx < 0 || sy < 0 || sx >= worldSize || sy >= worldSize);
+    const bool blockedTarget = (tx < 0 || ty < 0 || tx >= worldSize || ty >= worldSize ||
+                                (sourceInvalid ? true : columns[static_cast<size_t>(tx)][static_cast<size_t>(ty)] != 0u));
+    const bool noSourceBlock = sourceInvalid || columns[static_cast<size_t>(sx)][static_cast<size_t>(sy)] == 0u;
+    if (noSourceBlock || blockedTarget)
+    {
+        addJuiceAtCell(actor.x, actor.y, c.withMultipliedBrightness(0.85f), 0.42f);
+        screenShake = juce::jmin(1.0f, screenShake + 0.02f);
+        pushState.charge = 0;
+        return false;
+    }
+
+    ++pushState.charge;
+    const float force = static_cast<float>(pushState.charge) / 3.0f;
+    addJuiceAtCell(actor.x, actor.y, c.withMultipliedBrightness(0.95f), 0.32f + 0.24f * force);
+    screenShake = juce::jmin(1.0f, screenShake + 0.03f + 0.04f * force);
+
+    if (pushState.charge < 3)
+        return false;
+
+    pushState.charge = 0;
+    const bool moved = slideColumnOnce(sx, sy, dx, dy);
+    if (! moved)
+        return false;
+
+    // Player leans into the shove and steps into the space where the moved column was.
+    actor.x = sx;
+    actor.y = sy;
+    buildCacheDirty = true;
+    performanceCacheDirty = true;
+    addJuiceAtCell(actor.x, actor.y, c.withMultipliedBrightness(1.15f), 1.0f);
+    const int z = juce::jmax(1, topBlockZ(tx, ty));
+    triggerMidi(zToMidi(z), 0.92f, 0.12f);
+    return true;
 }
 
 std::vector<int> MainComponent::currentScaleSteps() const
@@ -1428,7 +1538,7 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
 
     if (selectingPerformanceMode)
     {
-        auto panel = getLocalBounds().toFloat().withSizeKeepingCentre(540.0f, 220.0f);
+        auto panel = getLocalBounds().toFloat().withSizeKeepingCentre(620.0f, 290.0f);
         g.setColour(juce::Colour(0xee070b14));
         g.fillRoundedRectangle(panel, 14.0f);
         g.setColour(juce::Colour(0xff16e9ff).withAlpha(0.9f));
@@ -1438,8 +1548,12 @@ void MainComponent::drawBuildOverlays(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions("Avenir Next", 28.0f, juce::Font::bold)));
         g.drawText("Choose Performance Mode", panel.removeFromTop(58.0f).toNearestInt(), juce::Justification::centred);
 
-        const juce::String labels[2] = { "Mode A  (Autonomous Snakes)", "Mode B  (Player-Steered Snakes)" };
-        for (int i = 0; i < 2; ++i)
+        const juce::String labels[3] = {
+            "Mode A  (Autonomous Snakes)",
+            "Mode B  (Player-Steered Snakes)",
+            "Mode C  (Two Floors: P1 Drums / P2 Synths)"
+        };
+        for (int i = 0; i < 3; ++i)
         {
             auto row = panel.removeFromTop(62.0f).reduced(26.0f, 8.0f);
             const bool sel = (i == pendingPerformanceModeIndex);
@@ -1535,9 +1649,9 @@ void MainComponent::drawBuildBackground(juce::Graphics& g)
 void MainComponent::paintBuild(juce::Graphics& g)
 {
     updateBuildCache();
-    const float shakeAmount = screenShake * 16.0f;
-    const float dx = (rng.nextFloat() * 2.0f - 1.0f) * shakeAmount;
-    const float dy = (rng.nextFloat() * 2.0f - 1.0f) * shakeAmount;
+    const float shakeAmount = screenShake * 8.0f;
+    const float dx = std::sin(titlePhase * 23.0f + 0.9f) * shakeAmount;
+    const float dy = std::cos(titlePhase * 29.0f + 0.4f) * shakeAmount;
     g.addTransform(juce::AffineTransform::translation(dx, dy));
     g.drawImageAt(buildCache, 0, 0);
     drawBuildOverlays(g);
@@ -1551,18 +1665,24 @@ void MainComponent::drawPerformanceBackground(juce::Graphics& g)
     const float beatBoost = 0.35f + beatFlash * 0.85f;
 
     const bool modeB = (performanceMode == PerformanceMode::b);
+    const bool modeC = (performanceMode == PerformanceMode::c);
 
     // Distinct mode palettes:
     // A: magenta/cyan, B: amber/lime.
-    const juce::Colour c0 = modeB ? juce::Colour::fromRGB(28, 22, 8) : juce::Colour::fromRGB(14, 8, 34);
-    const juce::Colour c1 = modeB ? juce::Colour::fromRGB(92, 66, 14) : juce::Colour::fromRGB(60, 18, 96);
-    const juce::Colour lineA = modeB ? juce::Colour::fromRGB(255, 196, 54) : juce::Colour::fromRGB(255, 84, 214);
-    const juce::Colour lineB = modeB ? juce::Colour::fromRGB(164, 255, 84) : juce::Colour::fromRGB(72, 236, 255);
+    const juce::Colour c0 = modeC ? juce::Colour::fromRGB(8, 22, 26)
+                                  : (modeB ? juce::Colour::fromRGB(28, 22, 8) : juce::Colour::fromRGB(14, 8, 34));
+    const juce::Colour c1 = modeC ? juce::Colour::fromRGB(10, 70, 82)
+                                  : (modeB ? juce::Colour::fromRGB(92, 66, 14) : juce::Colour::fromRGB(60, 18, 96));
+    const juce::Colour lineA = modeC ? juce::Colour::fromRGB(255, 132, 36)
+                                     : (modeB ? juce::Colour::fromRGB(255, 196, 54) : juce::Colour::fromRGB(255, 84, 214));
+    const juce::Colour lineB = modeC ? juce::Colour::fromRGB(48, 244, 255)
+                                     : (modeB ? juce::Colour::fromRGB(164, 255, 84) : juce::Colour::fromRGB(72, 236, 255));
 
     juce::ColourGradient wash(c0, centre.x, centre.y - 420.0f,
                               c1, centre.x, centre.y + 460.0f, false);
-    wash.addColour(0.55, modeB ? juce::Colour::fromRGBA(146, 108, 20, static_cast<uint8_t>(72.0f + 30.0f * beatBoost))
-                               : juce::Colour::fromRGBA(90, 40, 160, static_cast<uint8_t>(72.0f + 30.0f * beatBoost)));
+    wash.addColour(0.55, modeC ? juce::Colour::fromRGBA(16, 120, 132, static_cast<uint8_t>(72.0f + 30.0f * beatBoost))
+                               : (modeB ? juce::Colour::fromRGBA(146, 108, 20, static_cast<uint8_t>(72.0f + 30.0f * beatBoost))
+                                        : juce::Colour::fromRGBA(90, 40, 160, static_cast<uint8_t>(72.0f + 30.0f * beatBoost))));
     g.setGradientFill(wash);
     g.fillRect(area);
 
@@ -1613,44 +1733,81 @@ void MainComponent::updatePerformanceCache()
     g.fillAll(juce::Colour(0xff090d14));
     drawPerformanceBackground(g); // Bake background behind gameplay into cache for strict layering.
 
-    const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
-    const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
-    const juce::Point<float> origin(bounds.getCentreX() - cell * worldSize * 0.5f,
-                                    bounds.getCentreY() - cell * worldSize * 0.5f);
-    g.setColour(juce::Colour(0xff0f1725)); // Opaque square playfield only (no side-band artifacts).
-    g.fillRect(juce::Rectangle<float>(origin.x, origin.y, cell * worldSize, cell * worldSize));
+    const bool modeC = (performanceMode == PerformanceMode::c);
+    const auto bounds = getLocalBounds().toFloat().reduced(modeC ? 120.0f : 80.0f, modeC ? 56.0f : 80.0f);
+    const float boardSize = modeC
+        ? juce::jmin(bounds.getWidth() * 0.484f, bounds.getHeight() * 0.968f)
+        : juce::jmin(bounds.getWidth(), bounds.getHeight());
 
-    for (int y = 0; y < worldSize; ++y)
+    juce::Rectangle<float> boardA(bounds.getCentreX() - boardSize * 0.5f,
+                                  bounds.getCentreY() - boardSize * 0.5f,
+                                  boardSize, boardSize);
+    juce::Rectangle<float> boardB = boardA;
+    if (modeC)
     {
-        for (int x = 0; x < worldSize; ++x)
+        boardA.setX(bounds.getX() + 8.0f); // synth floor (left)
+        boardB.setX(bounds.getRight() - boardSize - 8.0f); // drum floor (right)
+    }
+
+    auto drawField = [&](juce::Rectangle<float> board, bool drumFloor)
+    {
+        const float cell = board.getWidth() / static_cast<float>(worldSize);
+        const juce::Point<float> origin(board.getX(), board.getY());
+        g.setColour(drumFloor ? juce::Colour(0xff1f1310) : juce::Colour(0xff0f1725));
+        g.fillRect(board);
+
+        for (int y = 0; y < worldSize; ++y)
         {
-            juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
-            const auto rr = r.reduced(1.0f);
-            g.setColour(juce::Colour(0xff111a2a));
-            g.fillRect(rr);
-
-            std::vector<int> stack;
-            stack.reserve(maxHeight);
-            for (int z = 1; z < maxHeight; ++z)
-                if (hasBlock(x, y, z))
-                    stack.push_back(z);
-
-            if (! stack.empty())
+            for (int x = 0; x < worldSize; ++x)
             {
-                const float bandH = rr.getHeight() / static_cast<float>(stack.size());
-                for (size_t i = 0; i < stack.size(); ++i)
-                {
-                    // Lower notes are shown in lower bands.
-                    const float yBand = rr.getY() + rr.getHeight() - bandH * static_cast<float>(i + 1);
-                    juce::Rectangle<float> band(rr.getX(), yBand, rr.getWidth(), bandH);
-                    g.setColour(pitchClassColour((stack[i] - 1) % 12).brighter(0.30f).withAlpha(0.80f));
-                    g.fillRect(band);
-                }
-            }
+                juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
+                const auto rr = r.reduced(1.0f);
+                g.setColour(drumFloor ? juce::Colour(0xff221712) : juce::Colour(0xff111a2a));
+                g.fillRect(rr);
 
-            g.setColour(juce::Colour(0xff36506c));
-            g.drawRect(r, 1.25f);
+                std::vector<int> stack;
+                stack.reserve(maxHeight);
+                for (int z = 1; z < maxHeight; ++z)
+                    if (hasBlock(x, y, z))
+                        stack.push_back(z);
+
+                if (! stack.empty())
+                {
+                    if (drumFloor)
+                    {
+                        const float energy = juce::jlimit(0.0f, 1.0f, static_cast<float>(stack.size()) / 8.0f);
+                        const juce::Colour drumC = juce::Colour::fromHSV(0.06f + 0.08f * energy, 0.85f, 0.92f, 0.70f);
+                        g.setColour(drumC);
+                        g.fillRect(rr.reduced(cell * 0.16f));
+                    }
+                    else
+                    {
+                        const float bandH = rr.getHeight() / static_cast<float>(stack.size());
+                        for (size_t i = 0; i < stack.size(); ++i)
+                        {
+                            const float yBand = rr.getY() + rr.getHeight() - bandH * static_cast<float>(i + 1);
+                            juce::Rectangle<float> band(rr.getX(), yBand, rr.getWidth(), bandH);
+                            g.setColour(pitchClassColour((stack[i] - 1) % 12).brighter(0.30f).withAlpha(0.80f));
+                            g.fillRect(band);
+                        }
+                    }
+                }
+
+                g.setColour(drumFloor ? juce::Colour(0xff73553a) : juce::Colour(0xff36506c));
+                g.drawRect(r, 1.25f);
+            }
         }
+    };
+
+    drawField(boardA, false);
+    if (modeC)
+    {
+        drawField(boardB, true);
+        g.setColour(juce::Colour(0xff6df7ff).withAlpha(0.25f));
+        g.drawLine(juce::Line<float>(boardA.getTopLeft(), boardB.getTopLeft()), 1.0f);
+        g.drawLine(juce::Line<float>(boardA.getTopRight(), boardB.getTopRight()), 1.0f);
+        g.drawLine(juce::Line<float>(boardA.getBottomLeft(), boardB.getBottomLeft()), 1.0f);
+        g.drawLine(juce::Line<float>(boardA.getBottomRight(), boardB.getBottomRight()), 1.0f);
     }
 
     performanceCacheDirty = false;
@@ -1658,13 +1815,26 @@ void MainComponent::updatePerformanceCache()
 
 void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
 {
-    const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
-    const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
-    const juce::Point<float> origin(bounds.getCentreX() - cell * worldSize * 0.5f,
-                                    bounds.getCentreY() - cell * worldSize * 0.5f);
-
-    const auto toPixel = [&](juce::Point<int> c)
+    const bool modeC = (performanceMode == PerformanceMode::c);
+    const auto bounds = getLocalBounds().toFloat().reduced(modeC ? 120.0f : 80.0f, modeC ? 56.0f : 80.0f);
+    const float boardSize = modeC
+        ? juce::jmin(bounds.getWidth() * 0.484f, bounds.getHeight() * 0.968f)
+        : juce::jmin(bounds.getWidth(), bounds.getHeight());
+    juce::Rectangle<float> boardSynth(bounds.getCentreX() - boardSize * 0.5f,
+                                      bounds.getCentreY() - boardSize * 0.5f,
+                                      boardSize, boardSize);
+    juce::Rectangle<float> boardDrum = boardSynth;
+    if (modeC)
     {
+        boardSynth.setX(bounds.getX() + 8.0f);
+        boardDrum.setX(bounds.getRight() - boardSize - 8.0f);
+    }
+
+    const float cell = boardSynth.getWidth() / static_cast<float>(worldSize);
+    const auto toPixel = [&](juce::Point<int> c, bool drumFloor)
+    {
+        const auto& board = drumFloor ? boardDrum : boardSynth;
+        const juce::Point<float> origin(board.getX(), board.getY());
         return juce::Point<float>(origin.x + (c.x + 0.5f) * cell, origin.y + (c.y + 0.5f) * cell);
     };
 
@@ -1678,31 +1848,42 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
         g.fillEllipse(pulse.p.x - radius * 0.33f, pulse.p.y - radius * 0.33f, radius * 0.66f * 2.0f, radius * 0.66f * 2.0f);
     }
 
-    auto drawSnake = [&](const Snake& s)
+    auto drawSnake = [&](const Snake& s, bool drumFloor)
     {
         if (s.trail.size() > 1)
         {
             juce::Path path;
-            path.startNewSubPath(origin.x + (s.trail.front().x + 0.5f) * cell,
-                                 origin.y + (s.trail.front().y + 0.5f) * cell);
+            const auto& board = drumFloor ? boardDrum : boardSynth;
+            path.startNewSubPath(board.getX() + (s.trail.front().x + 0.5f) * cell,
+                                 board.getY() + (s.trail.front().y + 0.5f) * cell);
             for (size_t i = 1; i < s.trail.size(); ++i)
-                path.lineTo(origin.x + (s.trail[i].x + 0.5f) * cell,
-                            origin.y + (s.trail[i].y + 0.5f) * cell);
+                path.lineTo(board.getX() + (s.trail[i].x + 0.5f) * cell,
+                            board.getY() + (s.trail[i].y + 0.5f) * cell);
             g.setColour(s.colour.withAlpha(0.18f + globalJuice * 0.45f));
             g.strokePath(path, juce::PathStrokeType(11.0f, juce::PathStrokeType::JointStyle::curved));
             g.setColour(s.colour.withAlpha(0.75f));
             g.strokePath(path, juce::PathStrokeType(4.0f, juce::PathStrokeType::JointStyle::curved));
         }
 
-        const auto p = toPixel(s.cell);
+        const auto p = toPixel(s.cell, drumFloor);
         g.setColour(s.colour.withAlpha(0.95f));
         g.fillEllipse(p.x - cell * 0.28f, p.y - cell * 0.28f, cell * 0.56f, cell * 0.56f);
     };
 
-    drawSnake(snakeA);
-    drawSnake(snakeB);
-    if (performanceMode == PerformanceMode::a && modeASnakeCount >= 3) drawSnake(snakeC);
-    if (performanceMode == PerformanceMode::a && modeASnakeCount >= 4) drawSnake(snakeD);
+    if (modeC)
+    {
+        for (int i = 0; i < modeCSnakeCountP1; ++i)
+            drawSnake(modeCSnakesP1[static_cast<size_t>(i)], true);
+        for (int i = 0; i < modeCSnakeCountP2; ++i)
+            drawSnake(modeCSnakesP2[static_cast<size_t>(i)], false);
+    }
+    else
+    {
+        drawSnake(snakeA, false);
+        drawSnake(snakeB, false);
+        if (performanceMode == PerformanceMode::a && modeASnakeCount >= 3) drawSnake(snakeC, false);
+        if (performanceMode == PerformanceMode::a && modeASnakeCount >= 4) drawSnake(snakeD, false);
+    }
 
     for (const auto& s : sparks)
     {
@@ -1711,51 +1892,67 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
         g.drawLine(s.p.x, s.p.y, s.p.x - s.v.x * 0.016f, s.p.y - s.v.y * 0.016f, juce::jmax(1.0f, s.size * (1.0f - t)));
     }
 
-    auto drawMarker = [&](const PlayerCursor& p, const juce::String& label)
+    auto drawMarker = [&](const PlayerCursor& p, const juce::String& label, bool drumFloor)
     {
-        const juce::Point<float> c(origin.x + (p.x + 0.5f) * cell, origin.y + (p.y + 0.5f) * cell);
+        const juce::Point<float> c = toPixel({ p.x, p.y }, drumFloor);
         g.setColour(p.colour.withAlpha(0.9f));
         g.drawEllipse(c.x - cell * 0.35f, c.y - cell * 0.35f, cell * 0.7f, cell * 0.7f, 2.0f);
         g.drawText(label, juce::Rectangle<int>(static_cast<int>(c.x - 18), static_cast<int>(c.y - 10), 36, 20), juce::Justification::centred);
     };
 
-    drawMarker(p1, "P1");
-    drawMarker(p2, "P2");
+    drawMarker(p1, "P1", modeC);
+    drawMarker(p2, "P2", false);
 
-    for (int y = 0; y < worldSize; ++y)
+    if (modeC)
     {
-        for (int x = 0; x < worldSize; ++x)
+        g.setColour(juce::Colour(0xff9ef7ff).withAlpha(0.82f));
+        g.setFont(juce::Font(juce::FontOptions("Avenir Next", 14.0f, juce::Font::bold)));
+        g.drawText("SYNTH FLOOR (P2)", boardSynth.withY(boardSynth.getY() - 22.0f).toNearestInt(), juce::Justification::centred);
+        g.setColour(juce::Colour(0xffffc27a).withAlpha(0.82f));
+        g.drawText("DRUM FLOOR (P1)", boardDrum.withY(boardDrum.getY() - 22.0f).toNearestInt(), juce::Justification::centred);
+    }
+
+    auto drawToolsOnBoard = [&](const juce::Rectangle<float>& board, float alphaMul)
+    {
+        for (int y = 0; y < worldSize; ++y)
         {
-            const Tool& t = tools[static_cast<size_t>(x)][static_cast<size_t>(y)];
-            if (t.type == ToolType::none)
-                continue;
-
-            juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
-            g.setColour(juce::Colours::white.withAlpha(0.8f));
-
-            if (t.type == ToolType::redirect)
+            for (int x = 0; x < worldSize; ++x)
             {
-                g.drawEllipse(r.reduced(cell * 0.2f), 2.0f);
-                const juce::Point<float> c = r.getCentre();
-                const float a = static_cast<float>(t.rotation) * (juce::MathConstants<float>::halfPi);
-                g.drawArrow(juce::Line<float>(c, c + juce::Point<float>(std::cos(a), std::sin(a)) * (cell * 0.24f)), 2.2f, 8.0f, 8.0f);
-            }
-            else
-            {
-                g.setColour(juce::Colour(0x99ffffff));
-                g.fillRoundedRectangle(r.reduced(cell * 0.2f), 4.0f);
-                g.setColour(juce::Colour(0xff121923));
-                juce::String label = "?";
-                if (t.type == ToolType::speed) label = "SPD" + juce::String(t.state + 1);
-                if (t.type == ToolType::ratchet) label = "R" + juce::String(t.state + 1);
-                if (t.type == ToolType::key) label = "K" + juce::String(t.state);
-                if (t.type == ToolType::scale) label = "S" + juce::String(t.state);
-                if (t.type == ToolType::section) label = "SEC" + juce::String(t.state);
-                g.setFont(juce::Font(juce::FontOptions("Avenir Next", 11.0f, juce::Font::bold)));
-                g.drawText(label, r.toNearestInt(), juce::Justification::centred);
+                const Tool& t = tools[static_cast<size_t>(x)][static_cast<size_t>(y)];
+                if (t.type == ToolType::none)
+                    continue;
+
+                juce::Rectangle<float> r(board.getX() + x * cell, board.getY() + y * cell, cell, cell);
+                g.setColour(juce::Colours::white.withAlpha(0.8f * alphaMul));
+
+                if (t.type == ToolType::redirect)
+                {
+                    g.drawEllipse(r.reduced(cell * 0.2f), 2.0f);
+                    const juce::Point<float> c = r.getCentre();
+                    const float a = static_cast<float>(t.rotation) * (juce::MathConstants<float>::halfPi);
+                    g.drawArrow(juce::Line<float>(c, c + juce::Point<float>(std::cos(a), std::sin(a)) * (cell * 0.24f)), 2.2f, 8.0f, 8.0f);
+                }
+                else
+                {
+                    g.setColour(juce::Colour(0x99ffffff).withAlpha(0.95f * alphaMul));
+                    g.fillRoundedRectangle(r.reduced(cell * 0.2f), 4.0f);
+                    g.setColour(juce::Colour(0xff121923).withAlpha(alphaMul));
+                    juce::String label = "?";
+                    if (t.type == ToolType::speed) label = "SPD" + juce::String(t.state + 1);
+                    if (t.type == ToolType::ratchet) label = "R" + juce::String(t.state + 1);
+                    if (t.type == ToolType::key) label = "K" + juce::String(t.state);
+                    if (t.type == ToolType::scale) label = "S" + juce::String(t.state);
+                    if (t.type == ToolType::section) label = "SEC" + juce::String(t.state);
+                    g.setFont(juce::Font(juce::FontOptions("Avenir Next", 11.0f, juce::Font::bold)));
+                    g.drawText(label, r.toNearestInt(), juce::Justification::centred);
+                }
             }
         }
-    }
+    };
+
+    drawToolsOnBoard(boardSynth, 1.0f);
+    if (modeC)
+        drawToolsOnBoard(boardDrum, 0.90f);
 
     if (performanceMode == PerformanceMode::b)
     {
@@ -1766,7 +1963,7 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
                 if (! randomRedirectActive[static_cast<size_t>(x)][static_cast<size_t>(y)])
                     continue;
 
-                juce::Rectangle<float> r(origin.x + x * cell, origin.y + y * cell, cell, cell);
+                juce::Rectangle<float> r(boardSynth.getX() + x * cell, boardSynth.getY() + y * cell, cell, cell);
                 const juce::Point<float> c = r.getCentre();
                 const float a = static_cast<float>(randomRedirectRotation[static_cast<size_t>(x)][static_cast<size_t>(y)] % 4) * juce::MathConstants<float>::halfPi;
                 g.setColour(juce::Colour(0xff16e9ff).withAlpha(0.75f));
@@ -1776,22 +1973,39 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
         }
     }
 
-    if (barPulse)
+    auto drawRadarAt = [&](juce::Point<float> c, juce::Colour col)
     {
-        g.setColour(juce::Colours::white.withAlpha(0.18f));
-        const float rr = 80.0f + static_cast<float>(beatPhase * 40.0);
-        g.drawEllipse(bounds.getCentreX() - rr, bounds.getCentreY() - rr, rr * 2.0f, rr * 2.0f, 2.0f);
+        if (barPulse)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.18f));
+            const float rr = 80.0f + static_cast<float>(beatPhase * 40.0);
+            g.drawEllipse(c.x - rr, c.y - rr, rr * 2.0f, rr * 2.0f, 2.0f);
+        }
+        g.setColour(col.withAlpha(beatFlash * 0.22f));
+        const float radarR = 40.0f + beatFlash * 420.0f;
+        g.drawEllipse(c.x - radarR, c.y - radarR, radarR * 2.0f, radarR * 2.0f, 3.0f);
+    };
+
+    if (modeC)
+    {
+        drawRadarAt(boardSynth.getCentre(), juce::Colour(0xff00fff2));
+        drawRadarAt(boardDrum.getCentre(), juce::Colour(0xffffa24a));
     }
-    g.setColour(juce::Colour(0xff00fff2).withAlpha(beatFlash * 0.22f));
-    const float radarR = 40.0f + beatFlash * 420.0f;
-    g.drawEllipse(bounds.getCentreX() - radarR, bounds.getCentreY() - radarR, radarR * 2.0f, radarR * 2.0f, 3.0f);
+    else
+    {
+        drawRadarAt(bounds.getCentre(), juce::Colour(0xff00fff2));
+    }
 
     g.setColour(juce::Colours::white.withAlpha(0.88f));
     g.setFont(juce::Font(juce::FontOptions("Avenir Next", 17.0f, juce::Font::plain)));
-    const juce::String modeLabel = (performanceMode == PerformanceMode::a ? "PERFORMANCE MODE A" : "PERFORMANCE MODE B");
+    juce::String modeLabel = "PERFORMANCE MODE A";
+    if (performanceMode == PerformanceMode::b) modeLabel = "PERFORMANCE MODE B";
+    else if (performanceMode == PerformanceMode::c) modeLabel = "PERFORMANCE MODE C";
     const juce::String steerHint = (performanceMode == PerformanceMode::b
                                         ? " | Steer: P1 WASD P2 Arrows"
-                                        : " | I: Add Snake (" + juce::String(modeASnakeCount) + "/4) | P: Switch A/B");
+                                        : (performanceMode == PerformanceMode::c
+                                               ? " | Two Floors: P1 Drums (Right) / P2 Synths (Left) | Shift+Move: Shove Blocks | I Add P1 Snake (" + juce::String(modeCSnakeCountP1) + "/4) | O Add P2 Snake (" + juce::String(modeCSnakeCountP2) + "/4) | P: Switch A/B/C"
+                                               : " | I: Add Snake (" + juce::String(modeASnakeCount) + "/4) | P: Switch A/B/C"));
     g.drawText(modeLabel + steerHint +
                    " | Tool " + toolToString(static_cast<ToolType>(selectedToolIndex)) +
                    " | Play " + playModeToString(playMode) +
@@ -1817,9 +2031,10 @@ void MainComponent::drawPerformanceOverlays(juce::Graphics& g)
 void MainComponent::paintPerformance(juce::Graphics& g)
 {
     updatePerformanceCache();
-    const float shakeAmount = screenShake * 24.0f;
-    const float dx = (rng.nextFloat() * 2.0f - 1.0f) * shakeAmount;
-    const float dy = (rng.nextFloat() * 2.0f - 1.0f) * shakeAmount;
+    const float perfShakeScale = barPulse ? 1.0f : 0.25f; // dial back 75% except on bar downbeats
+    const float shakeAmount = screenShake * 12.0f * perfShakeScale;
+    const float dx = std::sin(titlePhase * 25.0f + 1.8f) * shakeAmount;
+    const float dy = std::cos(titlePhase * 33.0f + 0.2f) * shakeAmount;
     g.addTransform(juce::AffineTransform::translation(dx, dy));
     g.drawImageAt(performanceCache, 0, 0);
     drawPerformanceOverlays(g);
@@ -1940,6 +2155,17 @@ void MainComponent::startPerformanceMode(PerformanceMode targetMode)
         p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
         p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
     }
+    else if (performanceMode == PerformanceMode::c)
+    {
+        modeCSnakeCountP1 = 1;
+        modeCSnakeCountP2 = 1;
+        modeCPushP1 = {};
+        modeCPushP2 = {};
+        for (auto& s : modeCSnakesP1) s.trail.clear();
+        for (auto& s : modeCSnakesP2) s.trail.clear();
+        p1.x = modeCSnakesP1[0].cell.x; p1.y = modeCSnakesP1[0].cell.y;
+        p2.x = modeCSnakesP2[0].cell.x; p2.y = modeCSnakesP2[0].cell.y;
+    }
     else
     {
         modeASnakeCount = 1;
@@ -1949,12 +2175,14 @@ void MainComponent::startPerformanceMode(PerformanceMode targetMode)
     repaint();
 }
 
-void MainComponent::triggerMidi(int midiNote, float velocity, float noteLengthSeconds)
+void MainComponent::triggerMidi(int midiNote, float velocity, float noteLengthSeconds,
+                                juce::MidiBuffer* synthEvents, int sampleOffset, int blockSamples)
 {
-    triggerMidiDelayed(midiNote, velocity, noteLengthSeconds, 0.0f);
+    triggerMidiDelayed(midiNote, velocity, noteLengthSeconds, 0.0f, synthEvents, sampleOffset, blockSamples);
 }
 
-void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteLengthSeconds, float delaySeconds)
+void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteLengthSeconds, float delaySeconds,
+                                       juce::MidiBuffer* synthEvents, int sampleOffset, int blockSamples)
 {
     if (midiNote < 0 || midiNote > 127)
         return;
@@ -1963,19 +2191,47 @@ void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteL
     {
         midiNote = juce::jlimit(0, 127, quantizeMidiToScale(midiNote));
         midiNote = juce::jlimit(0, 119, midiNote + 12); // global +1 octave for melodic synth voices
-        if (synthEngine == SynthEngine::ovalGlitch)
-            midiNote = juce::jlimit(0, 119, midiNote + 12); // Oval Glitch gets an additional +1 octave
     }
 
     delaySeconds = juce::jmax(0.0f, delaySeconds);
     noteLengthSeconds = juce::jmax(0.02f, noteLengthSeconds);
     velocity = juce::jlimit(0.0f, 1.0f, velocity);
+    sampleOffset = juce::jmax(0, sampleOffset);
 
     if (synthEngine == SynthEngine::chipPulse && midiNote < 120)
     {
         const int sfxType = (chipSfxTypeOverride >= 0) ? chipSfxTypeOverride
                                                        : ((chipSfxCycleCounter++) % 4);
         velocity = juce::jlimit(0.0f, 0.999f, 0.001f + 0.25f * static_cast<float>(sfxType) + velocity * 0.249f);
+    }
+
+    if (synthEvents != nullptr && blockSamples > 0)
+    {
+        const int delaySamples = static_cast<int>(std::round(delaySeconds * currentSr));
+        const int onOffset = sampleOffset + juce::jmax(0, delaySamples);
+        const int noteLengthSamples = juce::jmax(1, static_cast<int>(std::round(noteLengthSeconds * currentSr)));
+
+        if (onOffset < blockSamples)
+        {
+            synthEvents->addEvent(juce::MidiMessage::noteOn(1, midiNote, velocity), onOffset);
+            const int offOffset = onOffset + noteLengthSamples;
+            if (offOffset < blockSamples)
+            {
+                synthEvents->addEvent(juce::MidiMessage::noteOff(1, midiNote), offOffset);
+            }
+            else
+            {
+                const float remaining = static_cast<float>(offOffset - blockSamples)
+                                      / static_cast<float>(juce::jmax(1.0, currentSr));
+                pendingNoteOffs.push_back({ midiNote, juce::jmax(0.001f, remaining) });
+            }
+            return;
+        }
+
+        const float remainingToOn = static_cast<float>(onOffset - blockSamples)
+                                  / static_cast<float>(juce::jmax(1.0, currentSr));
+        pendingNoteOns.push_back({ midiNote, velocity, noteLengthSeconds, juce::jmax(0.001f, remainingToOn) });
+        return;
     }
 
     if (delaySeconds <= 0.0001f)
@@ -1986,13 +2242,21 @@ void MainComponent::triggerMidiDelayed(int midiNote, float velocity, float noteL
         return;
     }
 
+    const juce::ScopedLock sl(synthLock);
     pendingNoteOns.push_back({ midiNote, velocity, noteLengthSeconds, delaySeconds });
 }
 
-void MainComponent::triggerBeatMidi(int midiNote, float velocity)
+void MainComponent::triggerBeatMidi(int midiNote, float velocity, juce::MidiBuffer* beatEvents, int sampleOffset)
 {
     if (midiNote < 120 || midiNote > 123)
         return;
+
+    velocity = juce::jlimit(0.0f, 1.0f, velocity);
+    if (beatEvents != nullptr)
+    {
+        beatEvents->addEvent(juce::MidiMessage::noteOn(1, midiNote, velocity), juce::jmax(0, sampleOffset));
+        return;
+    }
 
     const juce::ScopedLock sl(synthLock);
     beatSynth.noteOn(1, midiNote, velocity);
@@ -2008,11 +2272,24 @@ void MainComponent::addJuiceAtCell(int x, int y, juce::Colour c, float strength)
     juce::Point<float> p;
     if (mode == Mode::performance)
     {
-        const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
-        const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
-        const juce::Point<float> origin(bounds.getCentreX() - cell * worldSize * 0.5f,
-                                        bounds.getCentreY() - cell * worldSize * 0.5f);
-        p = { origin.x + (x + 0.5f) * cell, origin.y + (y + 0.5f) * cell };
+        const bool modeC = (performanceMode == PerformanceMode::c);
+        const auto bounds = getLocalBounds().toFloat().reduced(modeC ? 120.0f : 80.0f, modeC ? 56.0f : 80.0f);
+        const float boardSize = modeC
+            ? juce::jmin(bounds.getWidth() * 0.484f, bounds.getHeight() * 0.968f)
+            : juce::jmin(bounds.getWidth(), bounds.getHeight());
+        juce::Rectangle<float> board(bounds.getCentreX() - boardSize * 0.5f,
+                                     bounds.getCentreY() - boardSize * 0.5f,
+                                     boardSize, boardSize);
+
+        if (modeC)
+        {
+            const bool drumSide = (c == p1.colour || c == snakeA.colour || c == juce::Colour(0xffffb347));
+            if (drumSide) board.setX(bounds.getRight() - boardSize - 8.0f);
+            else board.setX(bounds.getX() + 8.0f);
+        }
+
+        const float cell = board.getWidth() / static_cast<float>(worldSize);
+        p = { board.getX() + (x + 0.5f) * cell, board.getY() + (y + 0.5f) * cell };
     }
     else if (mode == Mode::build)
     {
@@ -2040,7 +2317,8 @@ void MainComponent::addJuiceAtCell(int x, int y, juce::Colour c, float strength)
     }
 }
 
-int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet, int gateSection, int snakeRole, int forcedImprovStyle)
+int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet, int gateSection, int snakeRole, int forcedImprovStyle,
+                                      juce::MidiBuffer* synthEvents, int sampleOffset, int blockSamples)
 {
     if (x < 0 || y < 0 || x >= worldSize || y >= worldSize)
         return -1;
@@ -2124,7 +2402,7 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
             const float v = baseVelocity * juce::jmax(0.30f, 1.0f - 0.14f * static_cast<float>(i));
             const float l = juce::jmax(0.028f, spacing * 0.85f * (1.0f - 0.06f * static_cast<float>(i)));
             const float d = spacing * static_cast<float>(i);
-            triggerMidiDelayed(applyRoleRegister(stepped), v, l, d);
+            triggerMidiDelayed(applyRoleRegister(stepped), v, l, d, synthEvents, sampleOffset, blockSamples);
         }
     };
 
@@ -2156,15 +2434,13 @@ int MainComponent::triggerNoteForCell(int x, int y, float velocity, float noteLe
 
         const float secondsPerBeat = 60.0f / static_cast<float>(juce::jmax(1.0, bpm));
         const float beatsUntilFinalBeatStart = juce::jmax(0.0f, static_cast<float>(beatsPerBar - 1) - beatInBar);
-        const float baseGateSeconds = juce::jmax(0.01f, beatsUntilFinalBeatStart * secondsPerBeat);
-        const float chordLengthScale = (synthEngine == SynthEngine::ovalGlitch) ? 0.25f : 1.0f;
-        const float gateUntilBeat4Seconds = juce::jmax(0.01f, baseGateSeconds * chordLengthScale);
+        const float gateUntilBeat4Seconds = juce::jmax(0.01f, beatsUntilFinalBeatStart * secondsPerBeat);
         const auto latchGuard = juce::ScopedValueSetter<bool>(chordLatchMode, true);
 
         for (size_t i = 0; i < chosen.size(); ++i)
         {
             const float vv = velocity * velScale * (0.98f - static_cast<float>(i) * 0.12f);
-            triggerMidi(applyRoleRegister(chosen[i]), vv, gateUntilBeat4Seconds);
+            triggerMidi(applyRoleRegister(chosen[i]), vv, gateUntilBeat4Seconds, synthEvents, sampleOffset, blockSamples);
         }
     };
 
@@ -2339,7 +2615,7 @@ void MainComponent::applyToolToSnake(Snake& snake)
     }
 }
 
-void MainComponent::advancePerformanceStep()
+void MainComponent::advancePerformanceStep(juce::MidiBuffer* synthEvents, juce::MidiBuffer* beatEvents, int sampleOffset, int blockSamples)
 {
     if (performanceMode == PerformanceMode::b)
     {
@@ -2437,14 +2713,36 @@ void MainComponent::advancePerformanceStep()
 
         const int stepSection = activeArrangementSection();
         applyToolToSnake(s);
-        const int chosenStyle = triggerNoteForCell(s.cell.x, s.cell.y, 0.9f, 0.18f, s.ratchet, stepSection, snakeRole, forcedImprovStyle);
+        int complexity = 0;
+        for (int z = 1; z < maxHeight; ++z)
+            if (hasBlock(s.cell.x, s.cell.y, z))
+                ++complexity;
+
+        int chosenStyle = -1;
+        if (performanceMode == PerformanceMode::c && snakeRole == 0)
+        {
+            if (complexity > 0)
+            {
+                int drumNote = 122; // hat default
+                if (complexity >= 6) drumNote = 120;      // kick for dense stacks
+                else if (complexity >= 4) drumNote = 121; // snare mid density
+                else if (((s.cell.x + s.cell.y + performanceStepCounter) & 1) == 0) drumNote = 123; // accent toggle
+
+                const float vv = juce::jlimit(0.0f, 1.0f, 0.56f + 0.06f * static_cast<float>(juce::jmin(complexity, 6)));
+                triggerBeatMidi(drumNote, vv, beatEvents, sampleOffset);
+                if (s.ratchet > 1)
+                    triggerBeatMidi(drumNote, vv * 0.72f, beatEvents, sampleOffset + juce::jmax(1, blockSamples / 16));
+                chosenStyle = 0;
+            }
+        }
+        else
+        {
+            chosenStyle = triggerNoteForCell(s.cell.x, s.cell.y, 0.9f, 0.18f, s.ratchet, stepSection, snakeRole, forcedImprovStyle,
+                                             synthEvents, sampleOffset, blockSamples);
+        }
+
         if (chosenStyle >= 0)
         {
-            int complexity = 0;
-            for (int z = 1; z < maxHeight; ++z)
-                if (hasBlock(s.cell.x, s.cell.y, z))
-                    ++complexity;
-
             if (complexity > 0)
             {
                 const bool onBeat = (performanceStepCounter % 4) == 0;
@@ -2454,15 +2752,49 @@ void MainComponent::advancePerformanceStep()
             }
         }
 
-        const auto bounds = getLocalBounds().toFloat().reduced(80.0f, 80.0f);
-        const float cell = juce::jmin(bounds.getWidth(), bounds.getHeight()) / static_cast<float>(worldSize);
-        const juce::Point<float> origin(bounds.getCentreX() - cell * worldSize * 0.5f,
-                                        bounds.getCentreY() - cell * worldSize * 0.5f);
-        pulses.push_back({ { origin.x + (s.cell.x + 0.5f) * cell, origin.y + (s.cell.y + 0.5f) * cell }, 0.0f, 0.4f, s.colour, 1.0f + s.ratchet * 0.24f });
+        const bool modeC = (performanceMode == PerformanceMode::c);
+        const auto pbounds = getLocalBounds().toFloat().reduced(modeC ? 120.0f : 80.0f, modeC ? 56.0f : 80.0f);
+        const float boardSize = modeC
+            ? juce::jmin(pbounds.getWidth() * 0.484f, pbounds.getHeight() * 0.968f)
+            : juce::jmin(pbounds.getWidth(), pbounds.getHeight());
+        juce::Rectangle<float> board(pbounds.getCentreX() - boardSize * 0.5f,
+                                     pbounds.getCentreY() - boardSize * 0.5f,
+                                     boardSize, boardSize);
+        if (modeC)
+            board.setX((snakeRole == 0) ? (pbounds.getRight() - boardSize - 8.0f) : (pbounds.getX() + 8.0f));
+
+        const float pulseCell = board.getWidth() / static_cast<float>(worldSize);
+        pulses.push_back({ { board.getX() + (s.cell.x + 0.5f) * pulseCell, board.getY() + (s.cell.y + 0.5f) * pulseCell }, 0.0f, 0.4f, s.colour, 1.0f + s.ratchet * 0.24f });
         return chosenStyle;
     };
 
-    if (performanceMode == PerformanceMode::a)
+    if (performanceMode == PerformanceMode::c)
+    {
+        for (int i = 0; i < modeCSnakeCountP1; ++i)
+        {
+            const int next = (i + 1) % juce::jmax(1, modeCSnakeCountP1);
+            stepSnake(modeCSnakesP1[static_cast<size_t>(i)],
+                      modeCSnakesP1[static_cast<size_t>(next)],
+                      0,
+                      -1);
+        }
+
+        int previousStyle = -1;
+        for (int i = 0; i < modeCSnakeCountP2; ++i)
+        {
+            int forcedStyle = -1;
+            if (previousStyle >= 0)
+                forcedStyle = (previousStyle + 1 + ((performanceStepCounter + barCounter + i) & 1)) % 3;
+            const int next = (i + 1) % juce::jmax(1, modeCSnakeCountP2);
+            const int chosen = stepSnake(modeCSnakesP2[static_cast<size_t>(i)],
+                                         modeCSnakesP2[static_cast<size_t>(next)],
+                                         1,
+                                         forcedStyle);
+            if (chosen >= 0)
+                previousStyle = chosen;
+        }
+    }
+    else if (performanceMode == PerformanceMode::a)
     {
         std::array<Snake*, 4> snakes { &snakeA, &snakeB, &snakeC, &snakeD };
         int previousStyle = -1;
@@ -2489,7 +2821,7 @@ void MainComponent::advancePerformanceStep()
     }
 }
 
-void MainComponent::advanceTransport(double deltaSeconds)
+void MainComponent::advanceTransport(double deltaSeconds, juce::MidiBuffer* beatEvents, juce::MidiBuffer* synthEvents, int blockSamples)
 {
     const double previousTotalBeats = static_cast<double>(beatCounter) + beatPhase;
     const double beatsPerSec = bpm / 60.0;
@@ -2505,7 +2837,15 @@ void MainComponent::advanceTransport(double deltaSeconds)
         int guard = 0;
         while (nextBeatLayerBeat <= currentTotalBeats && guard++ < 256)
         {
-            triggerBeatLayer(nextBeatLayerBeat);
+            int sampleOffset = 0;
+            if (beatEvents != nullptr && blockSamples > 0 && currentTotalBeats > previousTotalBeats)
+            {
+                const double rel = (nextBeatLayerBeat - previousTotalBeats) / (currentTotalBeats - previousTotalBeats);
+                sampleOffset = juce::jlimit(0, blockSamples - 1,
+                                            static_cast<int>(std::round(rel * static_cast<double>(blockSamples - 1))));
+            }
+
+            triggerBeatLayer(nextBeatLayerBeat, beatEvents, sampleOffset);
             nextBeatLayerBeat += 0.25; // 16th grid
         }
     }
@@ -2530,12 +2870,29 @@ void MainComponent::advanceTransport(double deltaSeconds)
 
     if (mode == Mode::performance && countdownBeats <= 0)
     {
-        performanceMoveAccumulator += deltaBeats;
-        while (performanceMoveAccumulator >= 0.25)
+        double remainingBeats = deltaBeats;
+        double localAccumulator = performanceMoveAccumulator;
+        int guard = 0;
+
+        while (localAccumulator + remainingBeats >= 0.25 && guard++ < 128)
         {
-            performanceMoveAccumulator -= 0.25;
-            advancePerformanceStep();
+            const double beatsToStep = 0.25 - localAccumulator;
+            const double beatAtStep = currentTotalBeats - remainingBeats + beatsToStep;
+            remainingBeats -= beatsToStep;
+            localAccumulator = 0.0;
+
+            int sampleOffset = 0;
+            if (beatEvents != nullptr && blockSamples > 0 && currentTotalBeats > previousTotalBeats)
+            {
+                const double rel = (beatAtStep - previousTotalBeats) / (currentTotalBeats - previousTotalBeats);
+                sampleOffset = juce::jlimit(0, blockSamples - 1,
+                                            static_cast<int>(std::round(rel * static_cast<double>(blockSamples - 1))));
+            }
+
+            advancePerformanceStep(synthEvents, beatEvents, sampleOffset, blockSamples);
         }
+
+        performanceMoveAccumulator = localAccumulator + remainingBeats;
     }
 }
 
@@ -2546,39 +2903,7 @@ void MainComponent::timerCallback()
     lastTimerMs = now;
     elapsedSinceTick += delta;
     titlePhase += static_cast<float>(delta * 2.4);
-
-    advanceTransport(delta);
-
-    for (auto it = pendingNoteOns.begin(); it != pendingNoteOns.end();)
-    {
-        it->secondsRemaining -= static_cast<float>(delta);
-        if (it->secondsRemaining <= 0.0f)
-        {
-            const juce::ScopedLock sl(synthLock);
-            synth.noteOn(1, it->note, it->velocity);
-            pendingNoteOffs.push_back({ it->note, it->lengthSeconds });
-            it = pendingNoteOns.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
-
-    for (auto it = pendingNoteOffs.begin(); it != pendingNoteOffs.end();)
-    {
-        it->secondsRemaining -= static_cast<float>(delta);
-        if (it->secondsRemaining <= 0.0f)
-        {
-            const juce::ScopedLock sl(synthLock);
-            synth.noteOff(1, it->note, 0.0f, true);
-            it = pendingNoteOffs.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
+    ++animationTick;
 
     for (auto it = pulses.begin(); it != pulses.end();)
     {
@@ -2612,9 +2937,15 @@ void MainComponent::timerCallback()
     if (mode == Mode::title)
         titleCacheDirty = true;
     else if (mode == Mode::build)
-        buildCacheDirty = true;
+    {
+        if ((animationTick & 1) == 0)
+            buildCacheDirty = true;
+    }
     else if (mode == Mode::performance)
-        performanceCacheDirty = true;
+    {
+        if ((animationTick & 1) == 0)
+            performanceCacheDirty = true;
+    }
 
     repaint();
 }
@@ -2705,16 +3036,25 @@ bool MainComponent::handleBuildKeys(const juce::KeyPress& key)
             repaint();
             return true;
         }
-        if (key == juce::KeyPress::upKey || key == juce::KeyPress::downKey)
+        if (key == juce::KeyPress::upKey)
         {
-            pendingPerformanceModeIndex = 1 - pendingPerformanceModeIndex;
+            pendingPerformanceModeIndex = (pendingPerformanceModeIndex + 2) % 3;
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::downKey)
+        {
+            pendingPerformanceModeIndex = (pendingPerformanceModeIndex + 1) % 3;
             repaint();
             return true;
         }
         if (key == juce::KeyPress::returnKey)
         {
             selectingPerformanceMode = false;
-            startPerformanceMode(pendingPerformanceModeIndex == 0 ? PerformanceMode::a : PerformanceMode::b);
+            PerformanceMode chosen = PerformanceMode::a;
+            if (pendingPerformanceModeIndex == 1) chosen = PerformanceMode::b;
+            else if (pendingPerformanceModeIndex == 2) chosen = PerformanceMode::c;
+            startPerformanceMode(chosen);
             repaint();
             return true;
         }
@@ -2890,6 +3230,8 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
 
     bool handledSteer = false;
     bool movedMarker = false;
+    bool shovedBlocks = false;
+    const bool shiftDown = key.getModifiers().isShiftDown();
     if (performanceMode == PerformanceMode::b)
     {
         if (key == juce::KeyPress::leftKey) { snakeB.dir = { -1, 0 }; handledSteer = true; }
@@ -2913,18 +3255,43 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
     }
     else
     {
-        if (key == juce::KeyPress::leftKey) { moveCursor(p2, -1, 0); movedMarker = true; }
-        else if (key == juce::KeyPress::rightKey) { moveCursor(p2, 1, 0); movedMarker = true; }
-        else if (key == juce::KeyPress::upKey) { moveCursor(p2, 0, -1); movedMarker = true; }
-        else if (key == juce::KeyPress::downKey) { moveCursor(p2, 0, 1); movedMarker = true; }
-        else if (c == 'w' || c == 'W') { moveCursor(p1, 0, -1); movedMarker = true; }
-        else if (c == 's' || c == 'S') { moveCursor(p1, 0, 1); movedMarker = true; }
-        else if (c == 'a' || c == 'A') { moveCursor(p1, -1, 0); movedMarker = true; }
-        else if (c == 'd' || c == 'D') { moveCursor(p1, 1, 0); movedMarker = true; }
+        if (performanceMode == PerformanceMode::c && shiftDown)
+        {
+            if (key == juce::KeyPress::leftKey) shovedBlocks = trySlideColumnWithEffort(p2, -1, 0, modeCPushP2, p2.colour);
+            else if (key == juce::KeyPress::rightKey) shovedBlocks = trySlideColumnWithEffort(p2, 1, 0, modeCPushP2, p2.colour);
+            else if (key == juce::KeyPress::upKey) shovedBlocks = trySlideColumnWithEffort(p2, 0, -1, modeCPushP2, p2.colour);
+            else if (key == juce::KeyPress::downKey) shovedBlocks = trySlideColumnWithEffort(p2, 0, 1, modeCPushP2, p2.colour);
+            else if (c == 'w' || c == 'W') shovedBlocks = trySlideColumnWithEffort(p1, 0, -1, modeCPushP1, p1.colour);
+            else if (c == 's' || c == 'S') shovedBlocks = trySlideColumnWithEffort(p1, 0, 1, modeCPushP1, p1.colour);
+            else if (c == 'a' || c == 'A') shovedBlocks = trySlideColumnWithEffort(p1, -1, 0, modeCPushP1, p1.colour);
+            else if (c == 'd' || c == 'D') shovedBlocks = trySlideColumnWithEffort(p1, 1, 0, modeCPushP1, p1.colour);
+        }
+        else
+        {
+            if (key == juce::KeyPress::leftKey) { moveCursor(p2, -1, 0); movedMarker = true; }
+            else if (key == juce::KeyPress::rightKey) { moveCursor(p2, 1, 0); movedMarker = true; }
+            else if (key == juce::KeyPress::upKey) { moveCursor(p2, 0, -1); movedMarker = true; }
+            else if (key == juce::KeyPress::downKey) { moveCursor(p2, 0, 1); movedMarker = true; }
+            else if (c == 'w' || c == 'W') { moveCursor(p1, 0, -1); movedMarker = true; }
+            else if (c == 's' || c == 'S') { moveCursor(p1, 0, 1); movedMarker = true; }
+            else if (c == 'a' || c == 'A') { moveCursor(p1, -1, 0); movedMarker = true; }
+            else if (c == 'd' || c == 'D') { moveCursor(p1, 1, 0); movedMarker = true; }
+        }
+    }
+
+    if (shovedBlocks)
+    {
+        repaint();
+        return true;
     }
 
     if (movedMarker)
     {
+        if (performanceMode == PerformanceMode::c)
+        {
+            modeCPushP1.charge = 0;
+            modeCPushP2.charge = 0;
+        }
         repaint();
         return true;
     }
@@ -2971,13 +3338,14 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
     }
     else if (c == 'p' || c == 'P')
     {
-        performanceMode = (performanceMode == PerformanceMode::a ? PerformanceMode::b : PerformanceMode::a);
-        if (performanceMode == PerformanceMode::b)
-        {
-            p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
-            p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
-        }
-        else
+        if (performanceMode == PerformanceMode::a) performanceMode = PerformanceMode::b;
+        else if (performanceMode == PerformanceMode::b) performanceMode = PerformanceMode::c;
+        else performanceMode = PerformanceMode::a;
+
+        p1.x = snakeA.cell.x; p1.y = snakeA.cell.y;
+        p2.x = snakeB.cell.x; p2.y = snakeB.cell.y;
+
+        if (performanceMode != PerformanceMode::b)
         {
             randomRedirectCells.clear();
             for (auto& col : randomRedirectActive)
@@ -2987,8 +3355,33 @@ bool MainComponent::handlePerformanceKeys(const juce::KeyPress& key)
                 for (auto& v : col)
                     v = 0;
         }
+
+        if (performanceMode == PerformanceMode::c)
+        {
+            modeCSnakeCountP1 = juce::jmax(1, juce::jmin(4, modeCSnakeCountP1));
+            modeCSnakeCountP2 = juce::jmax(1, juce::jmin(4, modeCSnakeCountP2));
+            p1.x = modeCSnakesP1[0].cell.x; p1.y = modeCSnakesP1[0].cell.y;
+            p2.x = modeCSnakesP2[0].cell.x; p2.y = modeCSnakesP2[0].cell.y;
+        }
+
         performanceCacheDirty = true;
         addJuiceAtCell(worldSize / 2, worldSize / 2, juce::Colour(0xff00fff2), 0.9f);
+    }
+    else if ((c == 'i' || c == 'I') && performanceMode == PerformanceMode::c)
+    {
+        modeCSnakeCountP1 = juce::jmin(4, modeCSnakeCountP1 + 1);
+        addJuiceAtCell(modeCSnakesP1[static_cast<size_t>(juce::jmax(0, modeCSnakeCountP1 - 1))].cell.x,
+                       modeCSnakesP1[static_cast<size_t>(juce::jmax(0, modeCSnakeCountP1 - 1))].cell.y,
+                       modeCSnakesP1[static_cast<size_t>(juce::jmax(0, modeCSnakeCountP1 - 1))].colour,
+                       0.95f);
+    }
+    else if ((c == 'o' || c == 'O') && performanceMode == PerformanceMode::c)
+    {
+        modeCSnakeCountP2 = juce::jmin(4, modeCSnakeCountP2 + 1);
+        addJuiceAtCell(modeCSnakesP2[static_cast<size_t>(juce::jmax(0, modeCSnakeCountP2 - 1))].cell.x,
+                       modeCSnakesP2[static_cast<size_t>(juce::jmax(0, modeCSnakeCountP2 - 1))].cell.y,
+                       modeCSnakesP2[static_cast<size_t>(juce::jmax(0, modeCSnakeCountP2 - 1))].colour,
+                       0.95f);
     }
     else if ((c == 'i' || c == 'I') && performanceMode == PerformanceMode::a)
     {
@@ -3293,7 +3686,7 @@ const char* MainComponent::beatStyleName(int style) const
     return "Off";
 }
 
-void MainComponent::triggerBeatLayer(double beatTime)
+void MainComponent::triggerBeatLayer(double beatTime, juce::MidiBuffer* beatEvents, int sampleOffset)
 {
     if (beatStyle <= 0)
         return;
@@ -3305,10 +3698,10 @@ void MainComponent::triggerBeatLayer(double beatTime)
     const auto step = static_cast<int>(std::floor(wrapped * 4.0 + 1.0e-6)) % stepsPerBar;
     const auto beatAtStep = [stepsPerBar, beatsPerBar](int beat) { return (beat * stepsPerBar) / beatsPerBar; };
 
-    auto hit = [this] (int midiNote, float velocity)
+    auto hit = [this, beatEvents, sampleOffset] (int midiNote, float velocity)
     {
         // Keep beats more supportive/subtle under melodic material.
-        triggerBeatMidi(midiNote, juce::jlimit(0.0f, 1.0f, velocity * 0.90f));
+        triggerBeatMidi(midiNote, juce::jlimit(0.0f, 1.0f, velocity * 0.90f), beatEvents, sampleOffset);
     };
 
     switch (beatStyle)

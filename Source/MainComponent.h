@@ -32,8 +32,8 @@ public:
     enum class ToolType { none, redirect, speed, ratchet, key, scale, section };
     enum class ScaleType { chromatic, major, minor, dorian, pentatonic };
     enum class PlayMode { melodic, chord, arpeggio };
-    enum class SynthEngine { digitalV4, fmGlass, velvetNoise, chipPulse, ovalGlitch, guitarPluck };
-    enum class PerformanceMode { a, b };
+    enum class SynthEngine { digitalV4, fmGlass, velvetNoise, chipPulse, guitarPluck };
+    enum class PerformanceMode { a, b, c };
 private:
 
     struct PlayerCursor
@@ -94,6 +94,15 @@ private:
         float secondsRemaining = 0.0f;
     };
 
+    struct PushAccumulator
+    {
+        int x = -1;
+        int y = -1;
+        int dx = 0;
+        int dy = 0;
+        int charge = 0;
+    };
+
     class WaveVoice final : public juce::SynthesiserVoice
     {
     public:
@@ -134,10 +143,6 @@ private:
         float noiseHP = 0.0f;
         float lastNoise = 0.0f;
         int chipSfxType = 0;
-        float ovalSkipPhaseLatch = 0.0f;
-        float ovalSkipSampleHold = 0.0f;
-        int ovalSkipDecimCounter = 0;
-        int ovalSkipDecimPeriod = 1;
         std::vector<float> ksDelay;
         int ksIndex = 0;
         float ksLast = 0.0f;
@@ -252,21 +257,25 @@ private:
     bool hasBlock(int x, int y, int z) const;
     void setBlock(int x, int y, int z, bool enabled);
     int topBlockZ(int x, int y) const;
+    bool slideColumnOnce(int x, int y, int dx, int dy);
+    bool trySlideColumnWithEffort(PlayerCursor& actor, int dx, int dy, PushAccumulator& pushState, juce::Colour c);
 
-    int triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet = 1, int gateSection = -1, int snakeRole = 0, int forcedImprovStyle = -1);
-    void triggerMidi(int midiNote, float velocity, float noteLengthSeconds);
-    void triggerMidiDelayed(int midiNote, float velocity, float noteLengthSeconds, float delaySeconds);
-    void triggerBeatMidi(int midiNote, float velocity);
+    int triggerNoteForCell(int x, int y, float velocity, float noteLengthSeconds, int ratchet = 1, int gateSection = -1, int snakeRole = 0, int forcedImprovStyle = -1,
+                           juce::MidiBuffer* synthEvents = nullptr, int sampleOffset = 0, int blockSamples = 0);
+    void triggerMidi(int midiNote, float velocity, float noteLengthSeconds, juce::MidiBuffer* synthEvents = nullptr, int sampleOffset = 0, int blockSamples = 0);
+    void triggerMidiDelayed(int midiNote, float velocity, float noteLengthSeconds, float delaySeconds,
+                            juce::MidiBuffer* synthEvents = nullptr, int sampleOffset = 0, int blockSamples = 0);
+    void triggerBeatMidi(int midiNote, float velocity, juce::MidiBuffer* beatEvents = nullptr, int sampleOffset = 0);
     void addJuiceAtCell(int x, int y, juce::Colour c, float strength);
 
-    void advanceTransport(double deltaSeconds);
-    void advancePerformanceStep();
+    void advanceTransport(double deltaSeconds, juce::MidiBuffer* beatEvents = nullptr, juce::MidiBuffer* synthEvents = nullptr, int blockSamples = 0);
+    void advancePerformanceStep(juce::MidiBuffer* synthEvents = nullptr, juce::MidiBuffer* beatEvents = nullptr, int sampleOffset = 0, int blockSamples = 0);
     void applyToolToSnake(Snake& snake);
     int activeArrangementSection() const;
     const char* sectionShortName(int sectionId) const;
     void advanceArrangementBar();
     const char* beatStyleName(int style) const;
-    void triggerBeatLayer(double beatTime);
+    void triggerBeatLayer(double beatTime, juce::MidiBuffer* beatEvents = nullptr, int sampleOffset = 0);
 
     void saveWorldToFile();
     void saveWorldToFileAs();
@@ -281,7 +290,7 @@ private:
     bool selectingBlankWorldSize = false;
     int blankWorldSignatureIndex = 1; // 0=3/4(12), 1=4/4(16), 2=5/4(20)
     bool selectingPerformanceMode = false;
-    int pendingPerformanceModeIndex = 0; // 0=A, 1=B
+    int pendingPerformanceModeIndex = 0; // 0=A, 1=B, 2=C
 
     std::array<std::array<uint32_t, maxWorldSize>, maxWorldSize> columns {};
     std::array<std::array<Tool, maxWorldSize>, maxWorldSize> tools;
@@ -295,6 +304,12 @@ private:
     Snake snakeC;
     Snake snakeD;
     int modeASnakeCount = 1;
+    std::array<Snake, 4> modeCSnakesP1;
+    std::array<Snake, 4> modeCSnakesP2;
+    int modeCSnakeCountP1 = 1;
+    int modeCSnakeCountP2 = 1;
+    PushAccumulator modeCPushP1;
+    PushAccumulator modeCPushP2;
     std::vector<Pulse> pulses;
     std::vector<Spark> sparks;
     bool chordLatchMode = false;
@@ -341,6 +356,7 @@ private:
     float globalJuice = 0.0f;
     float beatFlash = 0.0f;
     float screenShake = 0.0f;
+    int animationTick = 0;
 
     juce::CriticalSection synthLock;
     juce::Synthesiser synth;
