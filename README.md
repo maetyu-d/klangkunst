@@ -70,7 +70,7 @@ Menu:
 
 ## Save Format
 
-`*.klangkunst.json` stores:
+`*.mat` stores:
 - block heights
 - tool grid (`type`, `rotation`, `state`)
 - bpm, key root, scale
